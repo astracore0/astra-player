@@ -1,0 +1,22 @@
+{
+  "name": "astra-player",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight self-hosted local anime media server and streaming client for Termux and low-end hardware.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "termux",
+    "media-server",
+    "anime-player",
+    "streaming",
+    "offline-first",
+    "express"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

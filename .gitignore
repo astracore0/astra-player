@@ -1,5 +1,9 @@
-# Object file
-*.o
-
-# Ada Library Information
-*.ali
+node_modules/
+package-lock.json
+history.json
+config.json
+app.log
+subtitles/
+public/series_posters/
+public/cache_thumbs/
+.DS_Store
