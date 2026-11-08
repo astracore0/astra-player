@@ -6,21 +6,33 @@ Astra Player is a lightweight, offline-first media server and web player designe
 
 ## Key Features
 
-- Low Memory Footprint: Idles between 30 MB to 45 MB of RAM, preventing background process termination on Android devices.
-- Partial Content Streaming: Uses native HTTP range requests (HTTP 206) with 4 MB pre-buffer chunks, allowing fast seeking without buffering full video files into memory.
-- Text-Driven Studio UI: A responsive, dark-themed dashboard that does not rely on heavy external image APIs or thumbnail generation.
-- Offline Watch Progress: Automatically saves and syncs playback progress and timestamps to a local data file.
-- Custom Subtitle Integration: Attach local subtitle files (.vtt, .srt) directly or map downloaded tracks per episode.
-- Integrated System Diagnostics: Real-time RAM and server uptime telemetry on the settings panel.
-- Vanilla Frontend Architecture: Built with clean JavaScript, HTML5, and CSS, requiring no client-side frameworks.
+- **Low memory footprint:** idles between 30 MB and 45 MB of RAM, preventing background process termination on Android devices.
+- **Partial content streaming:** native HTTP range requests (HTTP 206) with 4 MB chunks for fast seeking without buffering whole files.
+- **Transcoding when needed:** 10-bit video, alternate audio tracks and formats the browser can't play go through ffmpeg. If native playback fails, the player automatically retries through the transcoder.
+- **Text-driven studio UI:** responsive dark dashboard, no thumbnail generation or image APIs.
+- **Watch progress:** resume points, per-episode "watched" marks, and series cards that continue where you left off.
+- **Subtitles:** embedded tracks (SRT/ASS/WebVTT) and external `.srt/.vtt/.ass/.ssa` files, with correct top/bottom positioning, italics/bold, styling controls and a **sync delay** slider. Tracks are pre-extracted in the background and cached, and your subtitle language is remembered between episodes.
+- **Audio:** track picker, preferred language, A/V sync offset, working Bass/Treble equalizer with presets.
+- **Playback tools:** speed (0.75×–2×), **Skip intro (+85 s)**, 10 s double-tap seek, auto-play next episode, lock screen, screen filters and adaptive sharpening (WebGL), volume/speed memory, media notification controls.
+- **Diagnostics:** live RAM/CPU telemetry (polled only while that page is open).
+
+### Keyboard shortcuts (player page)
+
+| Key | Action | Key | Action |
+|-----|--------|-----|--------|
+| Space / K | Play / pause | S | Skip intro (+85 s) |
+| ← / J, → / L | Seek ∓10 s | `[` / `]` | Speed down / up |
+| ↑ / ↓ | Volume | Z / X | Subtitle delay −/+ 0.1 s |
+| M | Mute | N / P | Next / previous episode |
+| F | Fullscreen | | |
 
 ---
 
 ## Prerequisites
 
-Ensure you have Node.js, Git, and storage access configured inside Termux:
+Node.js, Git and ffmpeg (ffmpeg/ffprobe are needed for subtitles, audio-track switching and transcoding):
 
-    pkg update && pkg install nodejs git -y
+    pkg update && pkg install nodejs git ffmpeg -y
     termux-setup-storage
 
 ---
@@ -29,7 +41,7 @@ Ensure you have Node.js, Git, and storage access configured inside Termux:
 
 1. Clone the repository:
 
-       git clone [https://github.com/](https://github.com/)<your-username>/astra-player.git
+       git clone https://github.com/<your-username>/astra-player.git
        cd astra-player
 
 2. Install dependencies:
@@ -38,23 +50,28 @@ Ensure you have Node.js, Git, and storage access configured inside Termux:
 
 3. Start the engine:
 
-       node server.js
+       npm start        # or: node server.js
 
-4. Access the interface:
-   Open your preferred browser on the device and visit:
+4. Open `http://localhost:3000` in your browser.
 
-       http://localhost:3000
+Optional environment variables: `PORT` (default 3000) and `HOST` (default `0.0.0.0`; use `127.0.0.1` to keep the server private to the device).
 
 ---
 
 ## Storage Configuration
 
-Astra Player scans directories in the following order by default:
-- ~/storage/shared/anime
-- /sdcard/anime
-- ~/storage/shared
+Astra Player scans directories in this order by default:
+- `~/storage/shared/anime` (or `Anime`)
+- `/sdcard/anime` (or `Anime`, `.anime`)
+- `/sdcard`
 
-To target a different directory on your storage, update the root path directly from the in-app Launcher Settings tab and select Save & Scan.
+To use a different folder, open **Folder Explorer**, navigate to it and tap **Set as Media Root**. Use **Rescan** on the dashboard after adding files.
+
+---
+
+## Security notes
+
+The server only serves files with video (`.mp4 .mkv .webm .avi .mov .ts .m4v`) or subtitle extensions, and never builds shell commands from file names. It has no authentication, so on shared networks set `HOST=127.0.0.1`.
 
 ---
 
