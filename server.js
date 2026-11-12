@@ -265,14 +265,16 @@ app.get('/api/video/metadata', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).json({ error: r.error });
 
-  const args = ['-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format', r.path];
+  markInteractive(15000);
+  const args = ['-v', 'quiet', '-analyzeduration', '5000000', '-probesize', '5000000', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', r.path];
   execFile('ffprobe', args, { maxBuffer: 16 * 1024 * 1024, timeout: 30000 }, (err, stdout) => {
     if (err) {
       return res.json({
         audioTracks: [{ streamIndex: '0:a:0', title: 'Default Audio', lang: 'und', codec: 'aac' }],
         subtitleTracks: [],
         is10BitHevc: false,
-        duration: 0
+        duration: 0,
+        chapters: []
       });
     }
     try {
@@ -281,6 +283,11 @@ app.get('/api/video/metadata', (req, res) => {
       const subtitleTracks = [];
       let is10BitHevc = false;
       let duration = parseFloat(info.format && info.format.duration) || 0;
+      const chapters = (info.chapters || []).map((c, i) => ({
+        start: parseFloat(c.start_time) || 0,
+        end: parseFloat(c.end_time) || 0,
+        title: String((c.tags && (c.tags.title || c.tags.TITLE)) || `Chapter ${i + 1}`).slice(0, 80)
+      })).filter((c) => c.end > c.start);
 
       (info.streams || []).forEach((s) => {
         const tags = s.tags || {};
@@ -313,10 +320,10 @@ app.get('/api/video/metadata', (req, res) => {
         }
       });
 
-      res.json({ audioTracks, subtitleTracks, is10BitHevc, duration });
+      res.json({ audioTracks, subtitleTracks, is10BitHevc, duration, chapters });
       prefetchSubtitles(r, subtitleTracks); // background, instant subtitles later
     } catch (e) {
-      res.json({ audioTracks: [], subtitleTracks: [], is10BitHevc: false, duration: 0 });
+      res.json({ audioTracks: [], subtitleTracks: [], is10BitHevc: false, duration: 0, chapters: [] });
     }
   });
 });
@@ -404,26 +411,42 @@ function assTimeToVtt(t) {
   return `${m[1].padStart(2, '0')}:${m[2]}:${m[3]}.${m[4].padEnd(3, '0')}`;
 }
 
+/* ASS colour (&HAABBGGRR or &HBBGGRR&) -> 'rrggbb' */
+function assColor(v) {
+  const m = /&?H?([0-9a-f]{6,8})&?/i.exec(String(v || '').trim());
+  if (!m) return '';
+  const h = m[1].slice(-6);
+  return h.slice(4, 6) + h.slice(2, 4) + h.slice(0, 2);
+}
+
 function assToVtt(raw) {
-  const lines = String(raw).replace(/^\uFEFF/, '').split(/\r\n|\r|\n/);
-  const styleTop = new Map();
+  const lines = String(raw).replace(/^﻿/, '').split(/\r\n|\r|\n/);
+  const styles = new Map();
   let section = '';
   let styleFmt = [];
   let evFmt = [];
+  let resX = 0, resY = 0;
   const cues = [];
 
   for (const line of lines) {
     const sec = /^\[(.+)\]\s*$/.exec(line.trim());
     if (sec) { section = sec[1].toLowerCase(); continue; }
 
-    if (section.includes('styles')) {
+    if (section === 'script info') {
+      const m = /^PlayRes([XY])\s*:\s*(\d+)/i.exec(line.trim());
+      if (m) { if (m[1].toUpperCase() === 'X') resX = Number(m[2]); else resY = Number(m[2]); }
+    } else if (section.includes('styles')) {
       if (/^format:/i.test(line)) {
         styleFmt = line.slice(7).split(',').map((x) => x.trim().toLowerCase());
       } else if (/^style:/i.test(line) && styleFmt.length) {
         const f = line.slice(6).split(',');
         const name = (f[styleFmt.indexOf('name')] || '').trim();
         const align = parseInt(f[styleFmt.indexOf('alignment')], 10);
-        if (name) styleTop.set(name, align >= 7 && align <= 9);
+        if (name) styles.set(name, {
+          top: align >= 7 && align <= 9, an: align || 2,
+          fs: parseFloat(f[styleFmt.indexOf('fontsize')]) || 0,
+          c1: assColor(f[styleFmt.indexOf('primarycolour')]), c3: assColor(f[styleFmt.indexOf('outlinecolour')])
+        });
       }
     } else if (section === 'events') {
       if (/^format:/i.test(line)) {
@@ -438,8 +461,10 @@ function assToVtt(raw) {
         if (!start || !end || /\{[^}]*\\p[1-9]/.test(text)) continue; // skip vector drawings
 
         const styleName = (parts[evFmt.indexOf('style')] || '').trim().replace(/^\*/, '');
+        const st = styles.get(styleName) || {};
         const anMatch = /\{[^}]*\\an([1-9])/.exec(text);
-        const top = anMatch ? Number(anMatch[1]) >= 7 : !!styleTop.get(styleName);
+        const an = anMatch ? Number(anMatch[1]) : (st.an || 2);
+        const top = anMatch ? Number(anMatch[1]) >= 7 : !!st.top;
 
         const clean = text
           .replace(/\{[^}]*\\i1[^}]*\}/g, '<i>')
@@ -453,7 +478,20 @@ function assToVtt(raw) {
           .replace(/\\h/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
-        if (clean) cues.push({ start, end, text: (top ? '<position:top>' : '') + clean });
+        if (!clean) continue;
+
+        // \pos / \move place the text at an exact spot (karaoke syllables, signs): keep that spot.
+        const pm = /\\pos\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/.exec(text) || /\\move\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,/.exec(text);
+        let marker = '';
+        if (pm && resX > 0 && resY > 0) {
+          const fsM = /\\fs(\d+(?:\.\d+)?)/.exec(text);
+          const c1M = /\\1?c&?H?([0-9a-f]{6})&?/i.exec(text);
+          const c3M = /\\3c&?H?([0-9a-f]{6})&?/i.exec(text);
+          const fs = fsM ? parseFloat(fsM[1]) : (st.fs || 0);
+          const x = (Number(pm[1]) / resX * 100).toFixed(2), y = (Number(pm[2]) / resY * 100).toFixed(2);
+          marker = `<pos:${x},${y},${an},${fs ? (fs / resY * 100).toFixed(2) : ''},${c1M ? assColor(c1M[1]) : (st.c1 || '')},${c3M ? assColor(c3M[1]) : (st.c3 || '')}>`;
+        }
+        cues.push({ start, end, text: marker ? marker + clean : (top ? '<position:top>' : '') + clean });
       }
     }
   }
@@ -654,6 +692,85 @@ app.get('/api/video/keyframe', (req, res) => {
   });
 });
 
+/* Hardware H.264 encoder (e.g. h264_mediacodec on Android/Termux). Detected once; the transcoder
+   uses it when asked to ("auto") and silently falls back to software x264 if it fails to start.
+   Override with ASTRA_HW_ENCODER=<encoder name> or ASTRA_HW_ENCODER=off. */
+let HW_ENCODER = null;
+let hwDisabled = false;
+const HW_FLAG = path.join(CACHE_DIR, 'hw_disabled');
+try { hwDisabled = fs.existsSync(HW_FLAG); } catch (e) {}
+function disableHwEncoder() {
+  HW_ENCODER = null; hwDisabled = true;
+  try { fs.writeFileSync(HW_FLAG, String(Date.now())); } catch (e) {}
+}
+const numCoresEarly = (() => { try { return os.cpus().length || 1; } catch (e) { return 1; } })();
+(function detectHwEncoder() {
+  const forced = process.env.ASTRA_HW_ENCODER;
+  if (forced === 'off' || (hwDisabled && !forced)) return;
+  if (forced) { HW_ENCODER = forced; log('SYSTEM', `Hardware encoder (forced): ${forced}`); return; }
+  execFile('ffmpeg', ['-hide_banner', '-encoders'], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    if (!err && /\bh264_mediacodec\b/.test(out)) {
+      HW_ENCODER = 'h264_mediacodec';
+      log('SYSTEM', 'Hardware encoder available: h264_mediacodec');
+    }
+  });
+})();
+
+app.get('/api/system/capabilities', (req, res) => {
+  res.json({ hwEncoder: HW_ENCODER, hwDisabled, cores: numCoresEarly, lowEnd: false });
+});
+app.post('/api/system/hw-reset', (req, res) => {
+  hwDisabled = false;
+  try { fs.unlinkSync(HW_FLAG); } catch (e) {}
+  execFile('ffmpeg', ['-hide_banner', '-encoders'], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    if (!err && /\bh264_mediacodec\b/.test(out)) HW_ENCODER = 'h264_mediacodec';
+    res.json({ hwEncoder: HW_ENCODER, hwDisabled });
+  });
+});
+
+// Software quality presets. "fast" trades picture quality for speed on weak phones.
+const QUALITY = {
+  low:      { height: 360, crf: 33, preset: 'ultrafast', hwBitrate: '900k', skipLoop: true },
+  fast:     { height: 480, crf: 31, preset: 'ultrafast', hwBitrate: '1500k' },
+  balanced: { height: 720, crf: 28, preset: 'ultrafast', hwBitrate: '3000k' },
+  quality:  { height: 720, crf: 23, preset: 'veryfast',  hwBitrate: '5000k' }
+};
+
+function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, hw, legacy }) {
+  const q = QUALITY[quality] || QUALITY.balanced;
+  // The decoder is the main cost for HEVC: give it real threads, keep some CPU for the encoder.
+  const decodeThreads = Math.max(2, Math.min(4, numCoresEarly));
+  // legacy = plain, conservative input flags (the original behaviour) used as a retry if the fast-start flags fail.
+  const a = legacy
+    ? ['-v', 'error', '-nostdin']
+    : ['-v', 'error', '-nostdin', '-threads', '2'];   // identical to the v1.3 decoder setup
+  a.push('-progress', 'pipe:3', '-nostats');          // live speed= readout (used by the Auto resolution mode)
+  if (transcodeVideo && q.skipLoop) a.push('-skip_loop_filter', 'all');   // cheaper HEVC decode at the lowest level
+  if (seekSec > 0) a.push('-ss', seekSec.toString());
+  a.push('-i', file, '-map', '0:v:0', '-map', audioTrack);
+
+  if (transcodeVideo) {
+    const scale = `scale=-2:min(ih\\,${q.height}):flags=fast_bilinear`;
+    if (hw) {
+      a.push('-vf', `${scale},format=nv12`, '-c:v', hw, '-b:v', q.hwBitrate, '-g', '30');
+    } else {
+      a.push('-vf', scale, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', q.preset,
+        '-tune', 'zerolatency', '-crf', String(q.crf), '-g', '30');
+    }
+  } else {
+    a.push('-c:v', 'copy', '-avoid_negative_ts', 'make_zero');
+  }
+
+  a.push('-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100',
+    '-max_muxing_queue_size', '1024',
+    '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-');
+  return a;
+}
+
+let transcodeJobId = 0;
+let transcodeStats = { speed: 0, fps: 0, at: 0, job: 0, quality: '', height: 0 };
+app.get('/api/transcode/stats', (req, res) => res.json({ ...transcodeStats, active: !!activeTranscodeProc, frozen: isTranscodeFrozen, age: transcodeStats.at ? Date.now() - transcodeStats.at : null }));
+
 // Robust Transcoder: handles Opus, AAC, FLAC, AC3 without audio pipe freeze
 app.get('/stream/transcode', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
@@ -661,81 +778,102 @@ app.get('/stream/transcode', (req, res) => {
 
   const audioTrack = String(req.query.audioTrack || '0:a:0');
   if (!/^0:(a:)?\d+$/.test(audioTrack)) return res.status(400).send('Bad audio track');
-  const is10Bit = req.query.is10Bit === '1';
+  const transcodeVideo = req.query.is10Bit === '1';
   const seekSec = Math.max(0, parseFloat(req.query.startTime) || 0);
+  const quality = QUALITY[req.query.q] ? req.query.q : 'balanced';
+  const hwWanted = transcodeVideo && !!HW_ENCODER && req.query.enc === 'hw';
 
+  markInteractive(20000);
   killTranscode();
-  enforceCacheQuota();
-
-  const ffmpegArgs = ['-v', 'error', '-nostdin', '-threads', '2'];
-  if (seekSec > 0) ffmpegArgs.push('-ss', seekSec.toString());
-
-  ffmpegArgs.push('-i', r.path, '-map', '0:v:0', '-map', audioTrack);
-
-  if (is10Bit) {
-    ffmpegArgs.push(
-      '-vf', 'scale=-2:min(ih\\,720)',
-      '-c:v', 'libx264',
-      '-pix_fmt', 'yuv420p',
-      '-preset', 'ultrafast',
-      '-tune', 'zerolatency',
-      '-crf', '28',
-      '-g', '30'
-    );
-  } else {
-    ffmpegArgs.push('-c:v', 'copy', '-avoid_negative_ts', 'make_zero');
-  }
-
-  // Universal Audio Resample to AAC stereo with safe timestamps (fixes Opus/AC3 stall)
-  ffmpegArgs.push(
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-ac', '2',
-    '-ar', '44100',
-    '-max_muxing_queue_size', '1024',
-    '-f', 'mp4',
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-'
-  );
+  const jobId = ++transcodeJobId;
+  activeTranscodeFile = req.query.file ? String(req.query.file) : '';
 
   res.writeHead(200, {
     'Content-Type': 'video/mp4',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive'
   });
-
-  // stderr MUST be drained: an unread pipe fills up (~64 KB) and freezes ffmpeg.
-  const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-  activeTranscodeProc = ffmpeg;
-  isTranscodeFrozen = false;
-
-  let errTail = '';
-  ffmpeg.stderr.on('data', (c) => { errTail = (errTail + c.toString()).slice(-600); });
-  ffmpeg.stdout.on('error', () => {});
   res.on('error', () => {});
 
-  ffmpeg.stdout.pipe(res);
+  let bytesOut = 0;
 
-  ffmpeg.on('error', (e) => {
-    log('ERROR', `ffmpeg failed to start: ${e.message}`);
-    res.end();
-  });
-  ffmpeg.on('close', (code, signal) => {
-    if (code && !signal && errTail.trim()) {
-      log('ERROR', `ffmpeg exited ${code} (${path.basename(r.path)}): ${errTail.trim().split('\n').pop()}`);
+  const launch = (hw, legacy) => {
+    const args = buildFfmpegArgs({ file: r.path, seekSec, audioTrack, transcodeVideo, quality, hw, legacy });
+    // stderr MUST be drained: an unread pipe fills up (~64 KB) and freezes ffmpeg.
+    const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+    activeTranscodeProc = ffmpeg;
+    transcodeStats = { speed: 0, fps: 0, at: 0, job: jobId, quality, height: QUALITY[quality].height };
+    if (ffmpeg.stdio[3]) {
+      ffmpeg.stdio[3].on('error', () => {});
+      ffmpeg.stdio[3].on('data', (c) => {
+        const t = c.toString();
+        const sp = [...t.matchAll(/speed=\s*([\d.]+)x/g)].pop();
+        const fp = [...t.matchAll(/fps=\s*([\d.]+)/g)].pop();
+        if (sp) { transcodeStats.speed = parseFloat(sp[1]); transcodeStats.at = Date.now(); }
+        if (fp) transcodeStats.fps = parseFloat(fp[1]);
+      });
     }
-    if (ffmpeg === activeTranscodeProc) {
-      activeTranscodeProc = null;
-      isTranscodeFrozen = false;
+    isTranscodeFrozen = false;
+
+    let superseded = false;
+    let hwWatch = null;
+    if (hw) {
+      // A hardware encoder that hangs (no error, no output) must not freeze playback: give up after 7 s.
+      hwWatch = setTimeout(function check() {
+        if (superseded || bytesOut > 0 || ffmpeg !== activeTranscodeProc || res.destroyed) return;
+        if (isTranscodeFrozen) { hwWatch = setTimeout(check, 3000); return; }
+        log('SYSTEM', `Hardware encoder ${hw} produced no output, disabling it and using software x264`);
+        disableHwEncoder();
+        superseded = true;
+        try { ffmpeg.kill('SIGKILL'); } catch (e) {}
+        launch(null, legacy);
+      }, 7000);
     }
-  });
+
+    let errTail = '';
+    ffmpeg.stderr.on('data', (c) => { errTail = (errTail + c.toString()).slice(-600); });
+    ffmpeg.stdout.on('error', () => {});
+    ffmpeg.stdout.on('data', (c) => { bytesOut += c.length; });
+    ffmpeg.stdout.pipe(res, { end: false });
+
+    ffmpeg.on('error', (e) => {
+      log('ERROR', `ffmpeg failed to start: ${e.message}`);
+      if (ffmpeg === activeTranscodeProc) activeTranscodeProc = null;
+      res.end();
+    });
+
+    ffmpeg.on('close', (code, signal) => {
+      clearTimeout(hwWatch);
+      if (superseded) return;
+      const failedEarly = code && !signal && bytesOut === 0;
+      if (failedEarly && hw && ffmpeg === activeTranscodeProc && !res.destroyed) {
+        log('SYSTEM', `Hardware encoder ${hw} failed to start, falling back to software x264`);
+        disableHwEncoder();
+        return launch(null, legacy);
+      }
+      if (failedEarly && !hw && !legacy && ffmpeg === activeTranscodeProc && !res.destroyed) {
+        log('SYSTEM', `ffmpeg fast-start failed (${errTail.trim().split('\n').pop() || 'exit ' + code}), retrying with plain arguments`);
+        return launch(null, true);
+      }
+      if (code && !signal && errTail.trim()) {
+        log('ERROR', `ffmpeg exited ${code} (${path.basename(r.path)}): ${errTail.trim().split('\n').pop()}`);
+      }
+      if (ffmpeg === activeTranscodeProc) {
+        activeTranscodeProc = null;
+        isTranscodeFrozen = false;
+      }
+      res.end();
+    });
+  };
+
+  launch(hwWanted ? HW_ENCODER : null);
 
   // Client went away: keep the process briefly (a seek may reconnect), then reap it.
   // A paused (frozen) stream is kept longer, but never forever.
   res.on('close', () => {
     if (res.writableFinished) return;
     const reap = () => {
-      if (ffmpeg !== activeTranscodeProc) return;
+      if (jobId !== transcodeJobId) return;
       if (isTranscodeFrozen && Date.now() - frozenSince < 10 * 60 * 1000) {
         setTimeout(reap, 60 * 1000);
         return;
@@ -745,6 +883,560 @@ app.get('/stream/transcode', (req, res) => {
     setTimeout(reap, 12000);
   });
 });
+
+
+/* ------------------------------------------------------------------ */
+/* AI subtitles: speech-to-text with whisper.cpp (runs fully offline)  */
+/* ------------------------------------------------------------------ */
+const AI_DIR = path.join(SUBTITLES_DIR, 'ai');
+try { fs.mkdirSync(AI_DIR, { recursive: true }); } catch (e) {}
+const HOME_DIR = os.homedir();
+const WHISPER_CANDIDATE_DIRS = [
+  ...String(process.env.PATH || '').split(path.delimiter),
+  path.join(HOME_DIR, 'whisper.cpp', 'build', 'bin'),
+  path.join(HOME_DIR, 'whisper.cpp'),
+  '/data/data/com.termux/files/usr/bin'
+];
+const WHISPER_MODEL_DIRS = [
+  path.join(__dirname, 'models'),
+  path.join(HOME_DIR, 'whisper.cpp', 'models'),
+  path.join(HOME_DIR, 'models')
+];
+// Preference order: fastest multilingual first (tiny ~2x faster than base on a phone). Put ggml-base.bin first via config whisper.model.
+const WHISPER_MODEL_ORDER = ['ggml-tiny.bin', 'ggml-base.bin', 'ggml-small.bin', 'ggml-base.en.bin', 'ggml-tiny.en.bin', 'ggml-small.en.bin'];
+
+function findWhisperBin() {
+  const wanted = process.env.ASTRA_WHISPER_BIN || (savedConfig.whisper && savedConfig.whisper.bin);
+  if (wanted) return fs.existsSync(wanted) ? wanted : null;
+  for (const dir of WHISPER_CANDIDATE_DIRS) {
+    for (const name of ['whisper-cli', 'whisper-cpp']) {
+      const p = path.join(dir, name);
+      try { fs.accessSync(p, fs.constants.X_OK); return p; } catch (e) {}
+    }
+  }
+  return null;
+}
+function listWhisperModels() {
+  const found = new Map();
+  const extra = process.env.ASTRA_WHISPER_MODEL || (savedConfig.whisper && savedConfig.whisper.model);
+  if (extra && fs.existsSync(extra)) found.set(path.basename(extra), extra);
+  for (const dir of WHISPER_MODEL_DIRS) {
+    try {
+      fs.readdirSync(dir).forEach((f) => { if (/^ggml-.*\.bin$/.test(f) && !/silero|vad/i.test(f) && !found.has(f)) found.set(f, path.join(dir, f)); });
+    } catch (e) {}
+  }
+  const names = [...found.keys()].sort((a, b) => {
+    const ia = WHISPER_MODEL_ORDER.indexOf(a), ib = WHISPER_MODEL_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  return { names, paths: found };
+}
+
+/* Optional voice-activity-detection model (ggml-silero-*.bin): whisper then only decodes real speech. */
+function findVadModel() {
+  const extra = process.env.ASTRA_WHISPER_VAD || (savedConfig.whisper && savedConfig.whisper.vad);
+  if (extra && fs.existsSync(extra)) return extra;
+  for (const dir of WHISPER_MODEL_DIRS) {
+    try { const f = fs.readdirSync(dir).find((n) => /^ggml-.*silero.*\.bin$/i.test(n)); if (f) return path.join(dir, f); } catch (e) {}
+  }
+  return '';
+}
+function aiKillJob(job) { (job.procs || []).forEach((p) => { try { p.kill('SIGKILL'); } catch (e) {} }); if (job.proc) { try { job.proc.kill('SIGKILL'); } catch (e) {} } }
+
+const aiJobs = new Map();      // key -> job
+const aiQueue = [];            // keys waiting
+let aiRunning = null;          // running job
+// Index of finished subtitles, so an episode finds its subtitle again whatever options/model are selected now.
+const AI_INDEX_FILE = path.join(AI_DIR, 'index.json');
+let aiIndex = {};
+try { aiIndex = JSON.parse(fs.readFileSync(AI_INDEX_FILE, 'utf-8')) || {}; } catch (e) { aiIndex = {}; }
+function aiIndexSave() { try { fs.writeFileSync(AI_INDEX_FILE, JSON.stringify(aiIndex)); } catch (e) {} }
+
+/* ---- readable names: "Anime Name [S01 E22]" ---------------------------------------- */
+function parseMediaName(fileName) {
+  const base = String(fileName || '').replace(/\.[a-z0-9]{2,4}$/i, '');
+  let s = base.replace(/[._]+/g, ' ');
+  let season = null, ep = null, m;
+  if ((m = /(?:^|[\s\[(])S(\d{1,2})\s*[ .\-]?E(?:P)?\s?(\d{1,4})(?=$|[\s\])\-])/i.exec(s)) || (m = /(?:^|[\s\[(])(\d{1,2})x(\d{2,4})(?=$|[\s\])])/i.exec(s))) {
+    season = +m[1]; ep = +m[2]; s = s.replace(m[0], ' ');
+  } else if ((m = /(?:^|[\s\[(\-])(?:episode|ep|e)\s*\.?\s*(\d{1,4})(?=$|[\s\])\-])/i.exec(s))) {
+    ep = +m[1]; s = s.replace(m[0], ' ');
+  } else if ((m = /\s-\s(\d{1,4})(?:v\d)?(?=\s|\[|\(|$)/.exec(s))) {
+    ep = +m[1]; s = s.replace(m[0], ' ');
+  }
+  let title = s.replace(/\[.*?\]|\(.*?\)/g, ' ')
+    .replace(/(\b1080p|\b720p|\b480p|AMZN|WEB-DL|\bAAC\b|H264|H\.264|x264|HEVC|x265|Multi Audio|Multimovies).*/i, '')
+    .replace(/[\[\]()]/g, ' ').replace(/\s[-–:]\s/g, ' ').replace(/[\s\-–:]+$/g, '').replace(/^[\s\-–:]+/g, '').replace(/\s+/g, ' ').trim();
+  if (!title) title = base.replace(/[\[\]()._]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return { title, season, ep };
+}
+function niceSubName(relPath, mode) {
+  const m = parseMediaName(path.basename(String(relPath || '')));
+  const pad = (n) => String(n).padStart(2, '0');
+  const tag = m.ep == null ? '' : m.season != null ? ` [S${pad(m.season)} E${pad(m.ep)}]` : ` [E${pad(m.ep)}]`;
+  return (m.title + tag + (mode === 'quick' ? ' (quick)' : '')).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function vttToSrt(vtt) {
+  let n = 0;
+  return String(vtt).replace(/\r/g, '').split(/\n\n+/).map((b) => {
+    const lines = b.split('\n'); const ti = lines.findIndex((l) => l.includes('-->'));
+    if (ti < 0) return '';
+    const t = lines[ti].replace(/\./g, ',');
+    const text = lines.slice(ti + 1).join('\n').trim();
+    return text ? `${++n}\n${t}\n${text}\n` : '';
+  }).filter(Boolean).join('\n');
+}
+const AI_EXPORT_DIR = path.join(AI_DIR, '..', 'export');
+function aiExport(job, vtt) {
+  try {
+    fs.mkdirSync(AI_EXPORT_DIR, { recursive: true });
+    const name = niceSubName(job.relPath, job.mode);
+    fs.writeFileSync(path.join(AI_EXPORT_DIR, `${name}.vtt`), vtt, 'utf-8');
+    fs.writeFileSync(path.join(AI_EXPORT_DIR, `${name}.srt`), vttToSrt(vtt), 'utf-8');
+    return name;
+  } catch (e) { return niceSubName(job.relPath, job.mode); }
+}
+const LANG3 = { jpn: 'ja', eng: 'en', hin: 'hi', kor: 'ko', zho: 'zh', chi: 'zh', spa: 'es', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de', rus: 'ru', ara: 'ar', ita: 'it', por: 'pt', tha: 'th', ind: 'id', tam: 'ta', tel: 'te' };
+/* The audio track usually says what language it is: then whisper does not waste time detecting it. */
+function aiTrackLang(file, track) {
+  return new Promise((resolve) => {
+    const sel = /^0:a:(\d+)$/.test(track) ? `a:${track.split(':')[2]}` : String(track).split(':')[1];
+    execFile('ffprobe', ['-v', 'error', '-select_streams', sel, '-show_entries', 'stream_tags=language', '-of', 'csv=p=0', file], { timeout: 10000 }, (err, out) => {
+      const l = LANG3[String(out || '').trim().toLowerCase().split(/\s/)[0]];
+      resolve(err || !l ? '' : l);
+    });
+  });
+}
+/* Android slows or suspends background CPU: hold a Termux wake lock while subtitles are being made. */
+let wakeHeld = false;
+function wakeLock(on) {
+  if (on === wakeHeld) return;
+  wakeHeld = on;
+  try { execFile(on ? 'termux-wake-lock' : 'termux-wake-unlock', [], () => {}); } catch (e) {}
+}
+
+function aiKeyFor(r, audioTrack, lang, translate, model) {
+  return crypto.createHash('sha1')
+    .update(`${r.path}|${r.stat.size}|${r.stat.mtimeMs}|${audioTrack}|${lang}|${translate ? 1 : 0}|${model}`)
+    .digest('hex');
+}
+const aiCacheFile = (key) => path.join(AI_DIR, `${key}.vtt`);
+
+/* Whisper emits "[BLANK_AUDIO]", "(music)", "♪" ... as text: those are not speech. */
+function stripNonSpeechCues(vtt) {
+  const blocks = String(vtt).replace(/\r/g, '').split(/\n\n+/);
+  const out = ['WEBVTT', ''];
+  blocks.forEach((b) => {
+    const lines = b.split('\n');
+    const ti = lines.findIndex((l) => l.includes('-->'));
+    if (ti < 0) return;
+    const text = lines.slice(ti + 1).join(' ').trim();
+    const plain = text.replace(/[\[\(].*?[\]\)]/g, '').replace(/[♪♫\s]/g, '');
+    if (!plain) return;
+    out.push(lines[ti], lines.slice(ti + 1).join('\n').trim(), '');
+  });
+  return out.join('\n');
+}
+
+function aiPublic(job) {
+  if (!job) return null;
+  const now = Date.now();
+  const elapsed = job.startedAt ? Math.round((now - job.startedAt) / 1000) : 0;
+  let eta = null;
+  if (job.state === 'transcribing' && job.doneSec > 0 && job.duration > 0) {
+    const rate = (now - job.startedAt) / 1000 / job.doneSec;          // wall seconds per audio second
+    eta = Math.max(0, Math.round(((job.totalSec || job.duration) - job.doneSec) * rate));
+  }
+  return { key: job.key, state: job.state, pct: Math.round(job.pct * 10) / 10, msg: job.msg || '', file: job.relPath, queued: aiQueue.length,
+    mode: job.mode || 'ai', name: niceSubName(job.relPath, job.mode), workers: job.workers || 0, vad: !!job.vad, langUsed: job.langUsed || '', chunk: job.chunk || 0, chunks: job.chunks || 0, elapsed, eta, cues: job.cues ? job.cues.length : 0, last: job.last || '', partial: !!(job.cues && job.cues.length) };
+}
+
+function aiFinish(job, state, msg) {
+  job.state = state; job.msg = msg || ''; job.proc = null;
+  if (state === 'done') {
+    job.pct = 100;
+    aiIndex[job.key] = { name: job.exportName || niceSubName(job.relPath, job.mode), mode: job.mode || 'ai', path: job.path, size: job.sig && job.sig.size, mtimeMs: job.sig && job.sig.mtimeMs, audioTrack: job.audioTrack, lang: job.lang, translate: !!job.translate, model: job.model, lines: job.cues ? job.cues.length : 0, created: Date.now() };
+    aiIndexSave();
+  }
+  try { if (job.wav) fs.unlinkSync(job.wav); } catch (e) {}
+  if (state === 'done' || state === 'cancelled') { try { fs.rmSync(job.workDir, { recursive: true, force: true }); } catch (e) {} }
+  if (aiRunning === job) aiRunning = null;
+  setImmediate(() => { aiPump(); if (!aiRunning) wakeLock(false); });
+}
+
+function aiPump() {
+  if (aiRunning) return;
+  while (aiQueue.length) {
+    const job = aiJobs.get(aiQueue.shift());
+    if (job && job.state === 'queued') { aiRunning = job; wakeLock(true); return aiRun(job); }
+  }
+}
+
+/* "00:01:02.500" / "01:02.500" -> seconds */
+function vttTime(s) {
+  const p = s.replace(',', '.').split(':').map(Number);
+  while (p.length < 3) p.unshift(0);
+  return p[0] * 3600 + p[1] * 60 + p[2];
+}
+function fmtVttTime(t) {
+  t = Math.max(0, t);
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t - h * 3600 - m * 60;
+  const pad = (n, w) => String(n).padStart(w, '0');
+  return `${pad(h, 2)}:${pad(m, 2)}:${pad(Math.floor(s), 2)}.${pad(Math.round((s % 1) * 1000) % 1000, 3)}`;
+}
+/* Parse whisper's VTT into cues; long cues are split at word boundaries (replaces -ml/-sow). */
+function parseWhisperVtt(raw, offset) {
+  const cues = [];
+  String(raw).replace(/\r/g, '').split(/\n\n+/).forEach((b) => {
+    const lines = b.split('\n');
+    const ti = lines.findIndex((l) => l.includes('-->'));
+    if (ti < 0) return;
+    const m = /([\d:.,]+)\s*-->\s*([\d:.,]+)/.exec(lines[ti]);
+    if (!m) return;
+    const text = lines.slice(ti + 1).join(' ').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const s = vttTime(m[1]) + offset, e = vttTime(m[2]) + offset;
+    if (text.length <= 60 || e - s < 2) return cues.push({ s, e, text });
+    const words = text.split(' '), parts = [];
+    let cur = '';
+    words.forEach((w) => { if (cur && (cur + ' ' + w).length > 48) { parts.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w; });
+    if (cur) parts.push(cur);
+    const total = parts.reduce((a, p) => a + p.length, 0);
+    let t = s;
+    parts.forEach((p) => { const d = (e - s) * (p.length / total); cues.push({ s: t, e: t + d, text: p }); t += d; });
+  });
+  return cues;
+}
+function cuesToVtt(cues) {
+  const out = ['WEBVTT', ''];
+  cues.forEach((c) => {
+    const plain = c.text.replace(/[\[\(].*?[\]\)]/g, '').replace(/[♪♫\s]/g, '');
+    if (!plain) return;                                   // [BLANK_AUDIO], (music) ...
+    out.push(`${fmtVttTime(c.s)} --> ${fmtVttTime(c.e)}`, c.text, '');
+  });
+  return out.join('\n');
+}
+const aiPartFile = (key) => path.join(AI_DIR, `${key}.part.vtt`);
+
+function aiSpawnWait(job, cmd, args, tailRef) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    job.proc = p; (job.procs = job.procs || new Set()).add(p); p.on('close', () => job.procs.delete(p));
+    try { os.setPriority(p.pid, 0); } catch (e) {}
+    const grab = (c) => { tailRef.t = (tailRef.t + c.toString()).slice(-600); };
+    p.stdout.on('data', grab); p.stderr.on('data', grab);
+    p.on('error', (e) => resolve({ code: -1, signal: null, err: e.message }));
+    p.on('close', (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function aiSkipRanges(file) {
+  return new Promise((resolve) => {
+    execFile('ffprobe', ['-v', 'error', '-show_chapters', '-print_format', 'json', file], { maxBuffer: 4 * 1024 * 1024, timeout: 15000 }, (err, out) => {
+      if (err) return resolve([]);
+      try {
+        const ch = (JSON.parse(out).chapters || []).map((c) => ({ a: parseFloat(c.start_time), b: parseFloat(c.end_time), t: (c.tags && (c.tags.title || '')) || '' }));
+        resolve(ch.filter((c) => /^(op|ed|ncop|nced)\b|opening|ending|credits|outro|\bintro\b/i.test(c.t.trim()) && c.b - c.a < 330).map((c) => [c.a, c.b]));
+      } catch (e) { resolve([]); }
+    });
+  });
+}
+async function aiRun(job) {
+  const bin = findWhisperBin();
+  const modelPath = listWhisperModels().paths.get(job.model);
+  if (!bin || !modelPath) return aiFinish(job, 'error', 'whisper.cpp or its model was not found');
+
+  const CH = Math.max(20, Number(process.env.ASTRA_AI_CHUNK_SEC) || 120);
+  // Chunk list: whole episode minus opening/ending/credits chapters (music, nothing to transcribe).
+  const skip = await aiSkipRanges(job.path);
+  const list = [];
+  if (job.duration > 0) {
+    let cursor = 0;
+    const segs = [];
+    skip.concat([[job.duration + 1, job.duration + 2]]).forEach(([a, b]) => { if (a > cursor) segs.push([cursor, Math.min(a, job.duration)]); cursor = Math.max(cursor, b); });
+    segs.forEach(([a, b]) => { for (let t = a; t < b - 3; t += CH) list.push({ start: t, len: Math.min(CH, b - t) }); });
+    job.skipped = skip.reduce((n, [a, b]) => n + Math.max(0, Math.min(b, job.duration) - a), 0);
+  } else list.push({ start: 0, len: 0 });
+  job.chunks = list.length;
+  job.workDir = path.join(AI_DIR, `${job.key}.work`);
+  try { fs.mkdirSync(job.workDir, { recursive: true }); } catch (e) {}
+  job.cues = []; job.chunk = 1; job.doneSec = 0; job.totalSec = list.reduce((n, c) => n + c.len, 0); job.startedAt = Date.now(); job.state = 'transcribing'; job.pct = 0.5;
+  const alive = () => job.state !== 'cancelled';
+  const publishPartial = () => { try { fs.writeFileSync(aiPartFile(job.key), cuesToVtt(job.cues), 'utf-8'); } catch (e) {} };
+
+  const doneSet = new Set(), claimed = new Set();
+  // Work starts at the playhead (job.from, updated while you watch/seek) so subtitles are always ahead of you.
+  const pickNext = () => {
+    const f = Math.max(0, list.findIndex((c) => c.start + c.len > (job.from || 0)));
+    for (let k = f; k < list.length; k++) if (!claimed.has(k)) return k;
+    for (let k = 0; k < f; k++) if (!claimed.has(k)) return k;
+    return -1;
+  };
+  // Two whisper workers on 6+ core phones (each with its own threads), one otherwise or when RAM is tight.
+  const cores = os.cpus().length;
+  const bigModel = !/tiny/i.test(job.model);
+  let workers = Number(savedConfig.whisper && savedConfig.whisper.parallel) || (cores >= 6 && !(bigModel && os.totalmem() < 3e9) ? 2 : 1);
+  workers = Math.max(1, Math.min(3, workers, list.length));
+  const threadsEach = Math.max(1, Math.min(4, Number(savedConfig.whisper && savedConfig.whisper.threads) || Math.floor(cores / workers)));
+  const vadModel = findVadModel();
+  job.tier = vadModel ? 0 : 1;               // 0 = fast flags + voice detection, 1 = fast flags, 2 = plain flags
+  job.workers = workers; job.vad = !!vadModel;
+  let fatal = null;
+  const inflight = new Map();                // worker -> { t0 }
+  const tick = setInterval(() => {
+    const per = job.partMs || (CH * 1000 * 1.5);
+    let frac = 0; inflight.forEach((w) => { frac += Math.min(0.95, (Date.now() - w.t0) / per); });
+    job.pct = Math.max(job.pct, ((doneSet.size + frac) / job.chunks) * 99.5);
+  }, 700);
+
+  const processChunk = async (i, wid) => {
+    const start = list[i].start;
+    const cacheJson = path.join(job.workDir, `${i}.json`);
+    let cues = null;
+    try { cues = JSON.parse(fs.readFileSync(cacheJson, 'utf-8')); } catch (e) {}      // resume
+    if (!cues) {
+      job.msg = `Listening \u00b7 ${doneSet.size + 1} of ${job.chunks}`;
+      const wav = path.join(job.workDir, `${i}.wav`);
+      const exArgs = ['-v', 'error', '-nostdin', '-y', '-ss', String(start), '-i', job.path, '-map', job.audioTrack];
+      if (job.duration > 0) exArgs.push('-t', String(list[i].len));
+      exArgs.push('-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav);
+      const exTail = { t: '' };
+      const ex = await aiSpawnWait(job, 'ffmpeg', exArgs, exTail);
+      if (!alive() || fatal) return null;
+      if (ex.code !== 0) throw new Error(`Audio extraction failed: ${exTail.t.trim().split('\n').pop() || ex.err || ex.signal || ex.code}`);
+      let size = 0; try { size = fs.statSync(wav).size; } catch (e) {}
+      if (size < 1000) cues = [];                          // silent / past-the-end slice
+      else {
+        const prefix = path.join(job.workDir, `${i}`);
+        const run = (threads, tier) => {
+          const args = ['-m', modelPath, '-f', wav, '-t', String(threads), '-l', job.langUsed || job.lang, '-ovtt', '-of', prefix];
+          if (tier <= 1) args.push('-bs', '1', '-bo', '1', '-mc', '0', '-nf', '-ac', job.mode === 'quick' ? '512' : '768');      // greedy, no fallback, shorter audio context
+          if (tier === 0) args.push('--vad', '-vm', vadModel);                                   // skip non-speech (music, silence)
+          if (job.translate) args.push('-tr');
+          const tail = { t: '' }, t0 = Date.now();
+          inflight.set(wid, { t0 });
+          return aiSpawnWait(job, bin, args, tail).then((r) => { inflight.delete(wid); job.partMs = Date.now() - t0; r.tail = tail.t; return r; });
+        };
+        let tier = job.tier, r = await run(threadsEach, tier);
+        // older whisper builds reject some flags: step down one tier (and remember it for the whole job)
+        while (alive() && !fatal && r.code !== 0 && !r.signal && tier < 2) {
+          if (job.tier === tier) job.tier = tier + 1;
+          tier = job.tier; job.msg = 'Retrying with simpler settings';
+          r = await run(threadsEach, tier);
+        }
+        if (!alive() || fatal) return null;
+        if (r.code !== 0 && threadsEach > 2) { job.msg = 'Retrying with fewer threads'; r = await run(2, 2); }
+        if (!alive() || fatal) return null;
+        if (r.code !== 0) {
+          throw new Error(r.signal ? `whisper was killed (${r.signal}) - Android probably ran out of memory. Close other apps or use ggml-tiny.bin`
+            : `whisper failed (exit ${r.code}): ${(r.tail || r.err || '').trim().split('\n').filter(Boolean).pop() || 'no output'}`);
+        }
+        let raw = '';
+        try { raw = fs.readFileSync(prefix + '.vtt', 'utf-8'); fs.unlinkSync(prefix + '.vtt'); } catch (e) {}
+        cues = parseWhisperVtt(raw, start);
+      }
+      try { fs.unlinkSync(wav); } catch (e) {}
+      try { fs.writeFileSync(cacheJson, JSON.stringify(cues)); } catch (e) {}
+    }
+    return cues;
+  };
+  const worker = async (wid) => {
+    for (let i = pickNext(); i >= 0 && alive() && !fatal; i = pickNext()) {
+      claimed.add(i);
+      let cues;
+      try { cues = await processChunk(i, wid); } catch (e) { fatal = e.message; aiKillJob(job); return; }
+      if (cues === null) return;
+      job.cues.push(...cues);
+      doneSet.add(i); job.chunk = Math.min(doneSet.size + 1, job.chunks);
+      job.doneSec = list.reduce((n, c, k) => n + (doneSet.has(k) ? c.len : 0), 0);
+      job.pct = Math.max(job.pct, (doneSet.size / job.chunks) * 99);
+      job.cues.sort((a, b) => a.s - b.s);
+      const lastCue = [...cues].reverse().find((c) => /[^\s\[\]\(\)\u266a\u266b]/.test(c.text.replace(/[\[\(].*?[\]\)]/g, '')));
+      if (lastCue) job.last = lastCue.text;
+      publishPartial();
+    }
+  };
+  await Promise.all(Array.from({ length: workers }, (_, w) => worker(w)));
+  clearInterval(tick);
+  if (!alive()) return aiFinish(job, 'cancelled', 'Cancelled');
+  if (fatal) { log('ERROR', `AI subtitles: ${fatal}`); return aiFinish(job, 'error', fatal); }
+
+  const vtt = cuesToVtt(job.cues);
+  if (vtt.length < 20) return aiFinish(job, 'error', 'No speech was detected in this audio track');
+  try { fs.writeFileSync(aiCacheFile(job.key), vtt, 'utf-8'); fs.unlinkSync(aiPartFile(job.key)); } catch (e) {}
+  job.exportName = aiExport(job, vtt);
+  if (!fs.existsSync(aiCacheFile(job.key))) return aiFinish(job, 'error', 'Could not save subtitles');
+  log('SYSTEM', `AI subtitles ready: ${path.basename(job.path)} (${job.model}, ${job.lang}${job.translate ? '→en' : ''}, ${job.cues.length} lines)`);
+  aiFinish(job, 'done', 'Subtitles ready');
+}
+
+function aiParams(src) {
+  const r = resolveFile(src.file, VIDEO_EXTS);
+  if (r.error) return { error: r.error, status: r.status };
+  const audioTrack = String(src.audioTrack || '0:a:0');
+  if (!/^0:(a:)?\d+$/.test(audioTrack)) return { error: 'Bad audio track', status: 400 };
+  const lang = /^[a-z]{2,3}$|^auto$/.test(String(src.lang || 'auto')) ? String(src.lang || 'auto') : 'auto';
+  const translate = src.translate === true || src.translate === '1' || src.translate === 'true';
+  const models = listWhisperModels();
+  const mode = String(src.mode) === 'quick' ? 'quick' : 'ai';
+  // quick = smallest model (fast, rough); ai = the most accurate model that is installed and still practical on a phone
+  const model = models.names.includes(String(src.model || '')) ? String(src.model)
+    : mode === 'quick' ? (models.names.find((n) => /tiny/.test(n)) || models.names[models.names.length - 1] || '')
+      : (models.names.find((n) => /base/.test(n)) || models.names.find((n) => /small/.test(n)) || models.names[0] || '');
+  return { r, audioTrack, lang, translate, model, mode, key: aiKeyFor(r, audioTrack, lang, translate, model + (mode === 'quick' ? '|quick' : '')) };
+}
+
+app.get('/api/ai/capabilities', (req, res) => {
+  const bin = findWhisperBin();
+  const models = listWhisperModels();
+  res.json({ available: !!bin && models.names.length > 0, bin: !!bin, vad: !!findVadModel(), models: models.names, running: aiPublic(aiRunning), queued: aiQueue.length });
+});
+
+app.get('/api/ai/subs', (req, res) => {
+  const p = aiParams(req.query);
+  if (p.error) return res.status(p.status).json({ error: p.error });
+  const job = aiJobs.get(p.key);
+  if (job && ['queued', 'extracting', 'transcribing'].includes(job.state)) { const f = parseFloat(req.query.from); if (Number.isFinite(f)) job.from = f; return res.json({ ...aiPublic(job), model: p.model, skipped: Math.round(job.skipped || 0) }); }
+  if (fs.existsSync(aiCacheFile(p.key))) return res.json({ key: p.key, state: 'done', pct: 100, msg: 'Subtitles ready', model: p.model, mode: p.mode, name: (aiIndex[p.key] && aiIndex[p.key].name) || niceSubName(String(req.query.file), p.mode), queued: aiQueue.length });
+  const st = job && job.state !== 'done' ? job.state : 'none';   // 'done' without a cache file means it was cleared
+  res.json({ key: p.key, state: st, pct: 0, msg: job && st !== 'none' ? job.msg : '', model: p.model, queued: aiQueue.length });
+});
+
+app.post('/api/ai/subs', (req, res) => {
+  if (!findWhisperBin() || !listWhisperModels().names.length) return res.status(501).json({ error: 'whisper.cpp / model not installed (see README)' });
+  const p = aiParams(req.body || {});
+  if (p.error) return res.status(p.status).json({ error: p.error });
+  if (fs.existsSync(aiCacheFile(p.key))) return res.json({ key: p.key, state: 'done', pct: 100 });
+  const existing = aiJobs.get(p.key);
+  if (existing && ['queued', 'extracting', 'transcribing'].includes(existing.state)) {
+    if (req.body && req.body.priority && existing.state === 'queued') { // the episode being watched jumps the queue
+      const i = aiQueue.indexOf(p.key); if (i > 0) { aiQueue.splice(i, 1); aiQueue.unshift(p.key); }
+    }
+    return res.json(aiPublic(existing));
+  }
+  const job = { from: Math.max(0, parseFloat(req.body.from) || 0), key: p.key, path: p.r.path, relPath: String(req.body.file), audioTrack: p.audioTrack, lang: p.lang, translate: p.translate, mode: p.mode,
+    model: p.model, sig: { size: p.r.stat.size, mtimeMs: p.r.stat.mtimeMs }, createdAt: Date.now(), state: 'queued', pct: 0, msg: 'Waiting in queue', duration: 0, proc: null };
+  aiJobs.set(p.key, job);
+  if (req.body && req.body.priority) aiQueue.unshift(p.key); else aiQueue.push(p.key);
+  execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', p.r.path], { timeout: 15000 }, (err, out) => {
+    if (!err) job.duration = parseFloat(out) || 0;
+    (p.lang === 'auto' ? aiTrackLang(p.r.path, p.audioTrack) : Promise.resolve('')).then((l) => { job.langUsed = l; aiPump(); });
+  });
+  res.json(aiPublic(job));
+});
+
+app.get('/api/ai/subs/vtt', (req, res) => {
+  const key = String(req.query.key || '');
+  if (!/^[0-9a-f]{40}$/.test(key)) return res.status(400).send('Bad key');
+  try {
+    res.set('Content-Type', 'text/vtt; charset=utf-8');
+    res.set('Cache-Control', 'no-store');
+    let body, partial = false;
+    try { body = fs.readFileSync(aiCacheFile(key), 'utf-8'); }
+    catch (e) { body = fs.readFileSync(aiPartFile(key), 'utf-8'); partial = true; }
+    res.set('X-Partial', partial ? '1' : '0');
+    res.send(body);
+  } catch (e) { res.status(404).send('Not generated yet'); }
+});
+
+app.get('/api/ai/subs/download', (req, res) => {
+  const key = String(req.query.key || '');
+  if (!/^[0-9a-f]{40}$/.test(key)) return res.status(400).send('Bad key');
+  const e = aiIndex[key];
+  let vtt;
+  try { vtt = fs.readFileSync(aiCacheFile(key), 'utf-8'); } catch (err) { return res.status(404).send('Not generated yet'); }
+  const fmt = String(req.query.fmt) === 'vtt' ? 'vtt' : 'srt';
+  const name = (e && e.name) || key.slice(0, 8);
+  res.set('Content-Type', fmt === 'vtt' ? 'text/vtt; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'");
+  res.set('Content-Disposition', `attachment; filename="${ascii}.${fmt}"; filename*=UTF-8''${encodeURIComponent(name)}.${fmt}`);
+  res.send(fmt === 'vtt' ? vtt : vttToSrt(vtt));
+});
+
+app.post('/api/ai/subs/cancel', (req, res) => {
+  const key = String((req.body && req.body.key) || '');
+  const job = aiJobs.get(key);
+  if (!job) return res.json({ ok: true });
+  if (job.state === 'queued') { aiQueue.splice(aiQueue.indexOf(key), 1); job.state = 'cancelled'; job.msg = 'Cancelled'; }
+  else if (job.proc) { job.state = 'cancelled'; aiKillJob(job); }
+  res.json({ ok: true });
+});
+
+/* All finished/running subtitles for one file, whatever options they were made with. */
+app.get('/api/ai/subs/for', (req, res) => {
+  const r = resolveFile(String(req.query.file || ''), VIDEO_EXTS);
+  if (r.error) return res.status(r.status).json({ error: r.error });
+  const items = new Map();
+  Object.entries(aiIndex).forEach(([key, e]) => {
+    if (e.path === r.path && e.size === r.stat.size && e.mtimeMs === r.stat.mtimeMs && fs.existsSync(aiCacheFile(key))) items.set(key, { key, state: 'done', ...e });
+  });
+  // legacy files (made before the index existed): recompute the keys of the usual option combinations
+  const models = listWhisperModels().names;
+  const legacyModels = Array.from(new Set(models.concat(['ggml-base.bin', 'ggml-tiny.bin', 'ggml-small.bin'])));
+  ['0:1', '0:2', '0:3', '0:4', '0:a:0', '0:a:1', '0:a:2'].forEach((trk) => ['auto', 'ja', 'en', 'hi', 'ko', 'zh'].forEach((lang) => [false, true].forEach((tr) => legacyModels.forEach((model) => {
+    const key = aiKeyFor(r, trk, lang, tr, model);
+    if (!items.has(key) && fs.existsSync(aiCacheFile(key))) {
+      const e = { path: r.path, size: r.stat.size, mtimeMs: r.stat.mtimeMs, audioTrack: trk, lang, translate: tr, model, lines: 0, created: (fs.statSync(aiCacheFile(key)).mtimeMs) };
+      aiIndex[key] = e; items.set(key, { key, state: 'done', ...e });
+    }
+  }))));
+  aiJobs.forEach((j) => { if (j.path === r.path && ['queued', 'extracting', 'transcribing'].includes(j.state)) items.set(j.key, { key: j.key, state: j.state, lang: j.lang, translate: j.translate, model: j.model, audioTrack: j.audioTrack, created: j.createdAt }); });
+  res.json({ items: Array.from(items.values()).sort((a, b) => (b.created || 0) - (a.created || 0)) });
+});
+
+/* ------------------------------------------------------------------ */
+/* Task manager: one list of everything running in the background      */
+/* ------------------------------------------------------------------ */
+let activeTranscodeFile = '';
+function dropThumbQueue() {
+  thumbQueue.splice(0).forEach((j) => { (thumbPending.get(j.out) || []).forEach((cb) => { try { cb(new Error('stopped')); } catch (e) {} }); thumbPending.delete(j.out); });
+}
+app.get('/api/tasks', (req, res) => {
+  const tasks = [];
+  aiJobs.forEach((j) => {
+    const pub = aiPublic(j);
+    const live = ['queued', 'extracting', 'transcribing'].includes(j.state);
+    tasks.push({ id: 'ai:' + j.key, type: 'ai', title: niceSubName(j.relPath || j.path || '', ''), file: j.relPath, label: j.mode === 'quick' ? 'Quick subtitles' : 'AI subtitles',
+      state: j.state, pct: pub.pct, detail: j.state === 'transcribing' ? `Part ${pub.chunk} of ${pub.chunks}${pub.eta != null ? ` \u00b7 ~${Math.max(1, Math.round(pub.eta / 60))} min left` : ''}` : (j.state === 'queued' ? 'Waiting in queue' : (j.msg || '')),
+      elapsed: pub.elapsed, eta: pub.eta, last: pub.last, opts: { audioTrack: j.audioTrack, lang: j.lang, translate: !!j.translate }, msg: j.state === 'error' ? j.msg : '', canStop: live, canClear: !live, meta: `${j.model || ''} \u00b7 ${j.lang || 'auto'}${j.translate ? ' \u2192 en' : ''}`, created: j.createdAt || 0 });
+  });
+  if (activeTranscodeProc) {
+    tasks.push({ id: 'transcode', type: 'transcode', title: path.basename(activeTranscodeFile).replace(/\.[^.]+$/, ''), file: activeTranscodeFile, label: 'Live video conversion',
+      state: isTranscodeFrozen ? 'paused' : 'running', pct: null, detail: `${transcodeStats.height || ''}p \u00b7 speed ${transcodeStats.speed ? transcodeStats.speed.toFixed(2) + 'x' : '\u2026'}`,
+      canStop: true, canClear: false, meta: transcodeStats.quality || '', created: Date.now() });
+  }
+  if (thumbQueue.length || thumbRunning) {
+    tasks.push({ id: 'thumbs', type: 'thumbs', title: 'Thumbnails', label: 'Thumbnail generation', state: 'running', pct: null, detail: `${thumbQueue.length + (thumbRunning ? 1 : 0)} left`, canStop: true, canClear: false, meta: '', created: Date.now() });
+  }
+  tasks.sort((a, b) => (b.created || 0) - (a.created || 0));
+  res.json({ tasks, activeCount: tasks.filter((t) => t.canStop).length });
+});
+function aiStopKey(key) {
+  const job = aiJobs.get(key);
+  if (!job) return false;
+  if (job.state === 'queued') { const i = aiQueue.indexOf(key); if (i >= 0) aiQueue.splice(i, 1); job.state = 'cancelled'; job.msg = 'Stopped'; return true; }
+  if (['extracting', 'transcribing'].includes(job.state)) { job.state = 'cancelled'; job.msg = 'Stopped'; aiKillJob(job); return true; }
+  return false;
+}
+function stopTask(id) {
+  if (id === 'transcode') { killTranscode(); return true; }
+  if (id === 'thumbs') { dropThumbQueue(); return true; }
+  if (id.startsWith('ai:')) return aiStopKey(id.slice(3));
+  return false;
+}
+app.post('/api/tasks/stop', (req, res) => {
+  const id = String((req.body && req.body.id) || '');
+  if (id === 'all') {
+    Array.from(aiJobs.keys()).forEach(aiStopKey); killTranscode(); dropThumbQueue();
+    return res.json({ ok: true });
+  }
+  res.json({ ok: stopTask(id) });
+});
+app.post('/api/tasks/clear', (req, res) => {          // remove finished entries (keeps the subtitle files)
+  Array.from(aiJobs.entries()).forEach(([k, j]) => { if (!['queued', 'extracting', 'transcribing'].includes(j.state)) aiJobs.delete(k); });
+  res.json({ ok: true });
+});
+process.on('exit', () => { try { if (aiRunning) aiKillJob(aiRunning); } catch (e) {} });
 
 /* ------------------------------------------------------------------ */
 /* Direct streaming (HTTP 206)                                         */
@@ -763,6 +1455,7 @@ app.get('/stream', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).send(r.error);
 
+  markInteractive(8000);
   const fileSize = r.stat.size;
   const contentType = CONTENT_TYPES[path.extname(r.path).toLowerCase()] || 'video/mp4';
   const CHUNK_SIZE = 1024 * 1024 * 4;
@@ -927,6 +1620,152 @@ app.post('/api/history/clear', (req, res) => {
   historyData = {};
   persistHistory();
   res.json({ status: 'cleared' });
+});
+
+/* ------------------------------------------------------------------ */
+/* Thumbnails: local cover image if present, else one video frame.     */
+/* No internet. Generated one at a time, cached as ~15 KB JPEGs, and   */
+/* never generated while a transcode is using the CPU.                 */
+/* ------------------------------------------------------------------ */
+/* Anything the viewer is waiting on (metadata, playback) outranks background thumbnails. */
+let interactiveUntil = 0;
+let thumbProc = null;
+let thumbAborted = false;
+function markInteractive(ms = 10000) {
+  interactiveUntil = Date.now() + ms;
+  if (thumbProc) { thumbAborted = true; try { thumbProc.kill('SIGKILL'); } catch (e) {} }
+}
+const THUMB_DIR = path.join(CACHE_DIR, 'thumbs');
+try { fs.mkdirSync(THUMB_DIR, { recursive: true }); } catch (e) {}
+const THUMB_MAX_BYTES = 80 * 1024 * 1024;
+const COVER_NAMES = ['cover', 'poster', 'folder', 'thumb', 'thumbnail', 'front', 'banner', 'art'];
+const IMG_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
+
+function findLocalCover(dir) {
+  try {
+    const items = fs.readdirSync(dir);
+    for (const base of COVER_NAMES) {
+      for (const it of items) {
+        const ext = path.extname(it).toLowerCase();
+        if (IMG_EXTS.includes(ext) && path.basename(it, path.extname(it)).toLowerCase() === base) {
+          return path.join(dir, it);
+        }
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+function coverFor(videoPath) {
+  const dir = path.dirname(videoPath);
+  const root = path.resolve(MEDIA_ROOT);
+  if (path.resolve(dir) === root) return null;           // loose files: a root cover isn't theirs
+  const own = findLocalCover(dir);
+  if (own) return own;
+  const parent = path.dirname(dir);                      // season folder -> series folder
+  return path.resolve(parent) !== root ? findLocalCover(parent) : null;
+}
+
+function thumbFileFor(r, kind) {
+  const cover = kind === 'series' ? coverFor(r.path) : null;
+  let coverSig = '';
+  if (cover) { try { const st = fs.statSync(cover); coverSig = `${cover}|${st.size}|${st.mtimeMs}`; } catch (e) {} }
+  const key = crypto.createHash('sha1')
+    .update(`v3|${kind}|${r.path}|${r.stat.size}|${r.stat.mtimeMs}|${coverSig}`)
+    .digest('hex');
+  return path.join(THUMB_DIR, `${key}.jpg`);
+}
+
+function makeThumb(r, kind, outFile, cb) {
+  const tmp = `${outFile}.tmp.jpg`;
+  const attempts = [];
+  if (kind === 'series') {
+    const cover = coverFor(r.path);
+    if (cover) attempts.push(['-i', cover]);
+  }
+  [90, 5].forEach((t) => attempts.push(['-skip_frame', 'nokey', '-ss', String(t), '-i', r.path]));
+
+  let i = 0;
+  const next = () => {
+    if (i >= attempts.length) return cb(new Error('no frame'));
+    const input = attempts[i++];
+    thumbProc = execFile('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-threads', '1', ...input,
+      '-frames:v', '1', '-an', '-sn',
+      '-vf', 'scale=256:144:force_original_aspect_ratio=increase,crop=256:144', '-q:v', '10', tmp],
+    { timeout: 20000 }, (err) => {
+      thumbProc = null;
+      if (thumbAborted) { try { fs.unlinkSync(tmp); } catch (e) {} return cb(new Error('aborted')); }
+      let ok = false;
+      try { ok = fs.statSync(tmp).size > 800; } catch (e) {}
+      if (!err && ok) return fs.rename(tmp, outFile, (e) => cb(e || null));
+      try { fs.unlinkSync(tmp); } catch (e) {}
+      next();
+    });
+  };
+  next();
+}
+
+const thumbQueue = [];
+const thumbPending = new Map();
+const thumbFailed = new Map();
+let thumbRunning = false;
+
+function requestThumb(r, kind, cb) {
+  const out = thumbFileFor(r, kind);
+  if (fs.existsSync(out)) return cb(null, out);
+  const failedAt = thumbFailed.get(out);
+  if (failedAt && Date.now() - failedAt < 10 * 60 * 1000) return cb(new Error('previously failed'));
+  if (thumbPending.has(out)) { thumbPending.get(out).push(cb); return; }
+  if (thumbQueue.length > 300) return cb(new Error('queue full'));
+  thumbPending.set(out, [cb]);
+  thumbQueue.push({ r, kind, out });
+  runThumbs();
+}
+
+function runThumbs() {
+  if (thumbRunning || thumbQueue.length === 0) return;
+  if (transcodeIsLive() || Date.now() < interactiveUntil) { setTimeout(runThumbs, 2500).unref(); return; }
+  thumbRunning = true;
+  thumbAborted = false;
+  const job = thumbQueue.shift();
+  makeThumb(job.r, job.kind, job.out, (err) => {
+    if (thumbAborted) {                       // yielded to playback: retry later, not a failure
+      thumbAborted = false; thumbQueue.unshift(job); thumbRunning = false;
+      setTimeout(runThumbs, 2500).unref(); return;
+    }
+    const waiters = thumbPending.get(job.out) || [];
+    thumbPending.delete(job.out);
+    if (err) thumbFailed.set(job.out, Date.now());
+    else enforceCacheQuota(THUMB_DIR, THUMB_MAX_BYTES);
+    waiters.forEach((w) => w(err, err ? null : job.out));
+    thumbRunning = false;
+    setTimeout(runThumbs, 50).unref();
+  });
+}
+
+app.get('/api/thumb', (req, res) => {
+  const r = resolveFile(req.query.file, VIDEO_EXTS);
+  if (r.error) return res.status(r.status).end();
+  const kind = req.query.kind === 'series' ? 'series' : 'video';
+
+  // Don't compete with a live transcode, and don't leave browser connections hanging.
+  if ((transcodeIsLive() || Date.now() < interactiveUntil) && !fs.existsSync(thumbFileFor(r, kind))) return res.status(204).end();
+
+  requestThumb(r, kind, (err, file) => {
+    if (err) return res.status(404).end();
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=604800');
+    fs.createReadStream(file).on('error', () => res.end()).pipe(res);
+  });
+});
+
+app.post('/api/thumbs/clear', (req, res) => {
+  let n = 0;
+  try {
+    fs.readdirSync(THUMB_DIR).forEach((f) => { try { fs.unlinkSync(path.join(THUMB_DIR, f)); n++; } catch (e) {} });
+  } catch (e) {}
+  thumbFailed.clear();
+  res.json({ status: 'cleared', removed: n });
 });
 
 /* ------------------------------------------------------------------ */
