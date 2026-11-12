@@ -718,7 +718,7 @@ function buildSubtitleList(tracks, relPath) {
 
     // Keep the subtitle language chosen on the previous episode.
     if (forcedTrack !== null) { if (String(s.streamIndex) === forcedTrack) autoChoose = choose; }
-    else if (vp.sub !== 'off' && vp.sub !== 'ai' && !autoChoose && preferredSubLang && s.lang === preferredSubLang) autoChoose = choose;
+    else if (vp.sub !== 'off' && !(vp.sub || '').startsWith('ai') && !autoChoose && preferredSubLang && s.lang === preferredSubLang) autoChoose = choose;
   });
 
   if (autoChoose) autoChoose(true);
@@ -2795,15 +2795,15 @@ function aiShow(info) {
     aiUi.files.append(nm, row);
   }
 }
+function aiRowLabel(meta) { return `${meta.mode === 'quick' ? 'Quick' : 'AI'} \u00b7 ${meta.lang === 'auto' ? 'auto-detect' : meta.lang}${meta.translate ? ' \u2192 English' : ''}`; }
 function aiAddRow(key, meta) {
-  const have = subTrackList.querySelector('[data-ai-key]');
-  if (aiRowKey === key && have) return have;
-  subTrackList.querySelectorAll('[data-ai-key]').forEach((r) => r.remove());
+  const have = [...subTrackList.querySelectorAll('[data-ai-key]')].find((r) => r.dataset.aiKey === key);
+  if (have) { if (meta) have.textContent = aiRowLabel(meta); aiRowKey = key; return have; }      // every generated subtitle stays in the list
   const row = document.createElement('div');
   row.className = 'opt-row';
   row.dataset.aiKey = key;
-  row.textContent = meta ? `${meta.mode === 'quick' ? 'Quick' : 'AI'} \u00b7 ${meta.lang === 'auto' ? 'auto-detect' : meta.lang}${meta.translate ? ' \u2192 English' : ''}` : (aiMode === 'quick' ? 'Quick subtitles' : 'AI subtitles');
-  row.onclick = () => { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${key}`); vpSet(activeVideoPath, { sub: 'ai' }); };
+  row.textContent = meta ? aiRowLabel(meta) : (aiMode === 'quick' ? 'Quick subtitles' : 'AI subtitles');
+  row.onclick = () => { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${key}`); vpSet(activeVideoPath, { sub: 'ai:' + key }); };
   subTrackList.appendChild(row);
   aiRowKey = key;
   return row;
@@ -2837,7 +2837,7 @@ function aiStartPolling(file) {
       clearInterval(aiPoll);
       showToast('Subtitles generated', 3000);
       const row = aiAddRow(info.key);
-      if (row) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); vpSet(activeVideoPath, { sub: 'ai' }); }
+      if (row) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); vpSet(activeVideoPath, { sub: 'ai:' + info.key }); }
     } else if (['error', 'cancelled', 'none'].includes(info.state)) {
       clearInterval(aiPoll);
       if (info.state === 'error') showToast(info.msg || 'Subtitle generation failed', 5000);
@@ -2886,11 +2886,14 @@ async function aiLoadExisting(path) {
     const done = items.filter((i) => i.state === 'done');
     const best = done.find((i) => i.mode !== 'quick') || done[0];
     if (best) {
-      const row = aiAddRow(best.key, best);
+      const rows = new Map();
+      done.slice().sort((a, b) => (a.mode === 'quick') - (b.mode === 'quick')).forEach((i) => rows.set(i.key, aiAddRow(i.key, i)));      // AI first, then Quick: all stay selectable
       const vp = vpGet(path);
       const sel = subTrackList.querySelector('.opt-row.selected');
       const nothing = !sel || sel.textContent.trim() === 'Off';
-      if (row && (vp.sub === 'ai' || (vp.sub === undefined && nothing))) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${best.key}`); }
+      const wantKey = vp.sub && vp.sub.startsWith('ai:') ? vp.sub.slice(3) : null;
+      const pick = wantKey && rows.get(wantKey) ? done.find((i) => i.key === wantKey) : best;
+      if (rows.get(pick.key) && (vp.sub === 'ai' || wantKey || (vp.sub === undefined && nothing))) { selectOptRow(subTrackList, rows.get(pick.key)); selectSubtitleUrl(`/api/ai/subs/vtt?key=${pick.key}`); }
       if ([...aiUi.lang.options].some((o) => o.value === best.lang)) aiUi.lang.value = best.lang;
       aiUi.tr.checked = !!best.translate;
       setAiMode(best.mode === 'quick' ? 'quick' : 'ai', false);
