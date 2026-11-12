@@ -1041,7 +1041,8 @@ function stripNonSpeechCues(vtt) {
 function aiPublic(job) {
   if (!job) return null;
   const now = Date.now();
-  const elapsed = job.startedAt ? Math.round((now - job.startedAt) / 1000) : 0;
+  const finished = ['done', 'error', 'cancelled'].includes(job.state);
+  const elapsed = job.startedAt ? Math.round(((finished && job.endedAt ? job.endedAt : now) - job.startedAt) / 1000) : 0;
   let eta = null;
   if (job.state === 'transcribing' && job.doneSec > 0 && job.duration > 0) {
     const rate = (now - job.startedAt) / 1000 / job.doneSec;          // wall seconds per audio second
@@ -1052,6 +1053,7 @@ function aiPublic(job) {
 }
 
 function aiFinish(job, state, msg) {
+  job.endedAt = Date.now();                       // the elapsed timer stops here
   job.state = state; job.msg = msg || ''; job.proc = null;
   if (state === 'done') {
     job.pct = 100;
@@ -1206,6 +1208,22 @@ async function aiRun(job) {
   const modelPath = listWhisperModels().paths.get(job.model);
   if (!bin || !modelPath) return aiFinish(job, 'error', 'whisper.cpp or its model was not found');
 
+  // Language: track tag first; if the file has none, let whisper listen to 30 s from the middle of the episode instead of guessing per chunk.
+  if (job.lang === 'auto' && !job.langUsed && !/\.en\b/.test(job.model) && job.duration > 60) {
+    try {
+      job.msg = 'Detecting language';
+      const lw = path.join(job.workDir || AI_DIR, `lang-${job.key}.wav`);
+      try { fs.mkdirSync(path.dirname(lw), { recursive: true }); } catch (e) {}
+      const ex = await aiSpawnWait(job, 'ffmpeg', ['-v', 'error', '-nostdin', '-y', '-ss', String(Math.floor(job.duration * 0.3)), '-i', job.path, '-map', job.audioTrack, '-t', '30', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', lw], { t: '' });
+      if (ex.code === 0) {
+        const tail = { t: '' };
+        await aiSpawnWait(job, bin, ['-m', modelPath, '-f', lw, '-dl', '-t', '2'], tail);
+        const m = /auto-detected language:\s*([a-z]{2,3})/i.exec(tail.t);
+        if (m) job.langUsed = m[1].toLowerCase();
+      }
+      try { fs.unlinkSync(lw); } catch (e) {}
+    } catch (e) {}
+  }
   const CH = Math.max(20, Number(process.env.ASTRA_AI_CHUNK_SEC) || 120);
   // Chunk list: whole episode minus opening/ending/credits chapters (music, nothing to transcribe).
   const skip = await aiSkipRanges(job.path);
@@ -1292,12 +1310,13 @@ async function aiRun(job) {
         // tier 0 = fast flags + tuned VAD, 1 = fast flags + basic VAD, 2 = fast flags, 3 = plain
         const run = (threads, tier) => {
           const args = ['-m', modelPath, '-f', wav, '-t', String(threads), '-l', job.langUsed || job.lang, '-ovtt', '-of', prefix];
-          if (tier <= 2) args.push('-bs', '1', '-bo', '1', '-mc', '0', '-ac', quick ? '768' : '1024',   // temperature fallback stays ON: it is what breaks decoding loops
+          if (tier <= 2) args.push('-bs', '1', '-bo', '1', '-mc', '0',
+            ...(quick ? ['-ac', '768'] : []),                    // AI mode keeps the full audio window: shortened windows shift timestamps   // temperature fallback stays ON: it is what breaks decoding loops
             '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6');
           if (tier <= 1) args.push('-sns');                                         // suppress music/sound-effect tokens (newer builds, same ones that have VAD)
           if (tier === 0) args.push('--vad', '-vm', vadModel, '-vt', '0.35', '-vsd', '250', '-vmsd', '20', '-vp', '200');
           else if (tier === 1) args.push('--vad', '-vm', vadModel);
-          if (job.translate) args.push('-tr');
+          if (job.translate && job.langUsed !== 'en') args.push('-tr');          // English audio: nothing to translate (and -tr hurts timing)
           const tail = { t: '' }, t0 = Date.now();
           inflight.set(wid, { t0 });
           return aiSpawnWait(job, bin, args, tail).then((r) => { inflight.delete(wid); job.partMs = Date.now() - t0; r.tail = tail.t; return r; });
