@@ -183,7 +183,13 @@ How it works:
 - The box shows the real progress (parts done, time left, time elapsed, the last sentence heard). Errors are shown in red with the cause (for example Android killed whisper because of low memory).
 - **Voice detection (big speed-up):** if a Silero VAD model is installed, whisper only decodes real speech and skips music and silence. Install it once: `cd ~/whisper.cpp && sh ./models/download-vad-model.sh silero-v5.1.2` (file `ggml-silero-v5.1.2.bin` in `~/whisper.cpp/models`, found automatically; or set `"whisper": {"vad": "/path/file.bin"}`).
 - **Two workers:** on phones with 6 or more cores two whisper processes work on different parts at the same time (set `"whisper": {"parallel": 1}` to turn it off, or `"threads": N` for threads per worker).
-- Speed settings used: greedy decoding (`-bs 1 -bo 1`), no temperature fallback (`-nf`), shorter audio context (`-ac 768`), no previous-text context (`-mc 0`). If your whisper build rejects them the server retries with plain settings by itself.
+- Speed settings used: greedy decoding (`-bs 1 -bo 1`), no previous-text context (`-mc 0`), shorter audio context (`-ac 768` quick / `1024` AI). Temperature fallback stays **on** (it is what breaks repeat loops). If your whisper build rejects a flag the server retries with simpler settings by itself.
+
+**Accuracy fixes (v1.13):**
+- *Repeat loops* ("you, you, you...", "No." 40 times, "a film of a film of..."): quiet/music parts no longer trap the tiny model, because suppression flags (`-et -lpt -nth -sns`) and a tuned voice detector are used, and every line is cleaned afterwards: stutters and repeated phrases are collapsed, duplicate and overlapping lines are merged, and a short line can no longer stay on screen for 40 seconds.
+- *Missing scenes at part edges:* each part is read 3 s early and 3 s late, and a part keeps the lines that *start* inside it, so a sentence is never cut at a boundary. If a long part comes back almost empty, it is checked again without voice detection.
+- *Damaged audio* (`Terminating thread with return code ...`): extraction retries by skipping corrupt AAC frames, then with a slow exact seek. If a slice still cannot be decoded it is skipped with a note in the log instead of stopping the whole episode.
+- Old v1.12 results are not reused (they are regenerated with the fixes). Opening/ending chapters are skipped by design, so a gap of about 90 s near the start is normal.
 
 Speed on a weak phone: transcription speed depends on the CPU. `ggml-tiny.bin` is used first because it is about twice as fast as base. For a faster file you can use a quantised model (for example `ggml-tiny-q5_1.bin`) if you have one. To prefer `ggml-base.bin` set `"whisper": {"model": "/full/path/ggml-base.bin", "threads": 4}` in `config.json`. Use **All episodes** and let it run while charging for a whole season.
 

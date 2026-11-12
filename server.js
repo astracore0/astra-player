@@ -1017,7 +1017,7 @@ function wakeLock(on) {
 
 function aiKeyFor(r, audioTrack, lang, translate, model) {
   return crypto.createHash('sha1')
-    .update(`${r.path}|${r.stat.size}|${r.stat.mtimeMs}|${audioTrack}|${lang}|${translate ? 1 : 0}|${model}`)
+    .update(`${r.path}|${r.stat.size}|${r.stat.mtimeMs}|${audioTrack}|${lang}|${translate ? 1 : 0}|${model}|v13`)
     .digest('hex');
 }
 const aiCacheFile = (key) => path.join(AI_DIR, `${key}.vtt`);
@@ -1116,6 +1116,66 @@ function cuesToVtt(cues) {
   });
   return out.join('\n');
 }
+
+/* ---- v1.13 cue clean-up: whisper (esp. tiny) loops on music/silence and stutters; fix it in JS ---- */
+const normTxt = (t) => String(t).toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').replace(/\s+/g, ' ').trim();
+const normTok = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '');
+function collapseRepeats(text) {
+  let t = String(text).replace(/\s+/g, ' ').trim();
+  t = t.replace(/(^|[\s"'(])(\p{L}+)(?:-\2){2,}(?=$|[\s.,!?"')])/giu, '$1$2');           // I-I-I-I  ->  I
+  let w = t.split(' ').filter((x) => x.length <= 25 && !/(\p{L}{2,})\1{4,}/iu.test(x));    // "ononoonoon..." junk tokens
+  for (let n = 1; n <= 12; n++) {
+    for (let i = 0; i + 2 * n <= w.length; i++) {
+      const base = w.slice(i, i + n).map(normTok).join(' ');
+      if (!base.trim()) continue;
+      let reps = 1;
+      while (i + (reps + 1) * n <= w.length && w.slice(i + reps * n, i + (reps + 1) * n).map(normTok).join(' ') === base) reps++;
+      if (reps >= (n >= 3 ? 2 : 3)) w.splice(i + n, (reps - 1) * n);                                       // "still still still" / "a film of a film of ..." -> once
+    }
+  }
+  return w.join(' ').replace(/\s+([,.!?])/g, '$1').trim();
+}
+const tokSet = (t) => new Set(normTxt(t).split(' ').filter(Boolean));
+function similar(a, b) {
+  const A = tokSet(a), B = tokSet(b);
+  if (!A.size || !B.size) return false;
+  let hit = 0; A.forEach((x) => { if (B.has(x)) hit++; });
+  return hit / Math.min(A.size, B.size) >= 0.8;
+}
+function cleanCues(cues) {
+  const out = [];
+  cues.slice().sort((a, b) => a.s - b.s || a.e - b.e).forEach((c) => {
+    const n0 = c.text.split(/\s+/).length;
+    let text = collapseRepeats(c.text);
+    const n1 = text ? text.split(/\s+/).length : 0;
+    if (n0 >= 8 && n1 <= 3 && n1 / n0 < 0.35) return;                  // nothing but a loop ("you, you, you, ...")
+    if (text.length > 200) text = text.slice(0, 200).replace(/\s+\S*$/, '');
+    const nt = normTxt(text);
+    if (!nt) return;
+    const s = c.s, maxOf = (t) => Math.min(8, 1.8 + t.length * 0.09);   // a 20-character line is not on screen for 40 s
+    const e = Math.min(Math.max(c.e, s + 0.4), s + maxOf(text));
+    const words = nt.split(' ').length;
+    // same (or near-same) line as one of the last three: a decoding loop or a chunk-edge duplicate -> keep one
+    let dup = null;
+    for (let k = out.length - 1; k >= 0 && k >= out.length - 3 && !dup; k--) {
+      const q = out[k], gap = s - (q.raw || q.e);
+      if (gap > 10) break;
+      const qn = normTxt(q.text);
+      if (qn === nt && (text.length >= 12 || gap < 1.5)) dup = q;
+      else if (text.length >= 12 && words >= 3 && gap < 6 && similar(q.text, text)) dup = q;
+    }
+    if (dup) {
+      if (nt.length > normTxt(dup.text).length && s < dup.e + 0.5) dup.text = text;
+      dup.raw = Math.max(dup.raw || 0, c.e);
+      dup.e = Math.min(Math.max(dup.e, e), dup.s + maxOf(dup.text));
+      return;
+    }
+    const p = out[out.length - 1];
+    if (p && s < p.e) p.e = Math.max(p.s + 0.3, s);                    // never overlap the previous line
+    out.push({ s, e, text, raw: c.e });
+  });
+  return out.map((c) => ({ s: c.s, e: c.e, text: c.text }));
+}
 const aiPartFile = (key) => path.join(AI_DIR, `${key}.part.vtt`);
 
 function aiSpawnWait(job, cmd, args, tailRef) {
@@ -1179,7 +1239,7 @@ async function aiRun(job) {
   workers = Math.max(1, Math.min(3, workers, list.length));
   const threadsEach = Math.max(1, Math.min(4, Number(savedConfig.whisper && savedConfig.whisper.threads) || Math.floor(cores / workers)));
   const vadModel = findVadModel();
-  job.tier = vadModel ? 0 : 1;               // 0 = fast flags + voice detection, 1 = fast flags, 2 = plain flags
+  job.tier = vadModel ? 0 : 2;               // 0 tuned voice detection, 1 basic, 2 fast flags only, 3 plain
   job.workers = workers; job.vad = !!vadModel;
   let fatal = null;
   const inflight = new Map();                // worker -> { t0 }
@@ -1189,51 +1249,89 @@ async function aiRun(job) {
     job.pct = Math.max(job.pct, ((doneSet.size + frac) / job.chunks) * 99.5);
   }, 700);
 
+  const HP = 3, TP = 3;                      // v1.13: each slice is read 3 s early and 3 s late so no sentence is cut at a chunk edge
   const processChunk = async (i, wid) => {
-    const start = list[i].start;
-    const cacheJson = path.join(job.workDir, `${i}.json`);
+    const start = list[i].start, len = list[i].len;
+    const cacheJson = path.join(job.workDir, `${i}.v13.json`);
     let cues = null;
     try { cues = JSON.parse(fs.readFileSync(cacheJson, 'utf-8')); } catch (e) {}      // resume
     if (!cues) {
-      job.msg = `Listening \u00b7 ${doneSet.size + 1} of ${job.chunks}`;
+      job.msg = `Listening · ${doneSet.size + 1} of ${job.chunks}`;
       const wav = path.join(job.workDir, `${i}.wav`);
-      const exArgs = ['-v', 'error', '-nostdin', '-y', '-ss', String(start), '-i', job.path, '-map', job.audioTrack];
-      if (job.duration > 0) exArgs.push('-t', String(list[i].len));
-      exArgs.push('-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav);
-      const exTail = { t: '' };
-      const ex = await aiSpawnWait(job, 'ffmpeg', exArgs, exTail);
+      const ss = Math.max(0, start - HP);
+      const sliceLen = len > 0 ? (start - ss) + len + TP : 0;
+      // Audio extraction, three attempts: normal -> skip corrupt AAC frames -> slow exact seek. A bad file never kills the job.
+      const extract = async (mode) => {
+        try { fs.unlinkSync(wav); } catch (e) {}
+        const a = ['-v', 'error', '-nostdin', '-y'];
+        if (mode >= 1) a.push('-err_detect', 'ignore_err', '-fflags', '+discardcorrupt+genpts');
+        if (mode < 2) a.push('-ss', String(ss));
+        a.push('-i', job.path, '-map', job.audioTrack);
+        if (mode >= 2) a.push('-ss', String(ss));
+        if (sliceLen > 0) a.push('-t', String(sliceLen));
+        a.push('-vn', '-af', 'aresample=async=1:first_pts=0', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav);
+        const tail = { t: '' };
+        const r = await aiSpawnWait(job, 'ffmpeg', a, tail);
+        let size = 0; try { size = fs.statSync(wav).size; } catch (e) {}
+        return { r, size, tail: tail.t };
+      };
+      let ex = await extract(0);
+      for (let mode = 1; mode <= 2 && alive() && !fatal && ex.r.code !== 0 && ex.size < Math.max(1000, sliceLen * 32000 * 0.9); mode++) {
+        job.msg = 'Audio has damaged frames · retrying'; ex = await extract(mode);
+      }
       if (!alive() || fatal) return null;
-      if (ex.code !== 0) throw new Error(`Audio extraction failed: ${exTail.t.trim().split('\n').pop() || ex.err || ex.signal || ex.code}`);
-      let size = 0; try { size = fs.statSync(wav).size; } catch (e) {}
-      if (size < 1000) cues = [];                          // silent / past-the-end slice
+      const size = ex.size;
+      if (ex.r.code !== 0 && size < 1000) {
+        job.badChunks = (job.badChunks || 0) + 1;
+        log('WARN', `AI subtitles: audio slice ${i + 1} could not be decoded (${(ex.tail.trim().split('\n').pop() || ex.r.err || ex.r.code)}); skipped`);
+        cues = [];
+      } else if (size < 1000) cues = [];                  // silent / past-the-end slice
       else {
         const prefix = path.join(job.workDir, `${i}`);
+        const quick = job.mode === 'quick';
+        // tier 0 = fast flags + tuned VAD, 1 = fast flags + basic VAD, 2 = fast flags, 3 = plain
         const run = (threads, tier) => {
           const args = ['-m', modelPath, '-f', wav, '-t', String(threads), '-l', job.langUsed || job.lang, '-ovtt', '-of', prefix];
-          if (tier <= 1) args.push('-bs', '1', '-bo', '1', '-mc', '0', '-nf', '-ac', job.mode === 'quick' ? '512' : '768');      // greedy, no fallback, shorter audio context
-          if (tier === 0) args.push('--vad', '-vm', vadModel);                                   // skip non-speech (music, silence)
+          if (tier <= 2) args.push('-bs', '1', '-bo', '1', '-mc', '0', '-ac', quick ? '768' : '1024',   // temperature fallback stays ON: it is what breaks decoding loops
+            '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6');
+          if (tier <= 1) args.push('-sns');                                         // suppress music/sound-effect tokens (newer builds, same ones that have VAD)
+          if (tier === 0) args.push('--vad', '-vm', vadModel, '-vt', '0.35', '-vsd', '250', '-vmsd', '20', '-vp', '200');
+          else if (tier === 1) args.push('--vad', '-vm', vadModel);
           if (job.translate) args.push('-tr');
           const tail = { t: '' }, t0 = Date.now();
           inflight.set(wid, { t0 });
           return aiSpawnWait(job, bin, args, tail).then((r) => { inflight.delete(wid); job.partMs = Date.now() - t0; r.tail = tail.t; return r; });
         };
-        let tier = job.tier, r = await run(threadsEach, tier);
-        // older whisper builds reject some flags: step down one tier (and remember it for the whole job)
-        while (alive() && !fatal && r.code !== 0 && !r.signal && tier < 2) {
-          if (job.tier === tier) job.tier = tier + 1;
-          tier = job.tier; job.msg = 'Retrying with simpler settings';
-          r = await run(threadsEach, tier);
+        const transcribe = async (firstTier) => {
+          let tier = Math.max(firstTier, job.tier), r = await run(threadsEach, tier);
+          // older whisper builds reject some flags: step down one tier (and remember it for the whole job)
+          while (alive() && !fatal && r.code !== 0 && !r.signal && tier < 3) {
+            if (job.tier === tier) job.tier = tier + 1;
+            tier = Math.max(tier + 1, job.tier); job.msg = 'Retrying with simpler settings';
+            r = await run(threadsEach, tier);
+          }
+          if (alive() && !fatal && r.code !== 0 && threadsEach > 2) { job.msg = 'Retrying with fewer threads'; r = await run(2, 3); }
+          if (!alive() || fatal) return null;
+          if (r.code !== 0) {
+            throw new Error(r.signal ? `whisper was killed (${r.signal}) - Android probably ran out of memory. Close other apps or use ggml-tiny.bin`
+              : `whisper failed (exit ${r.code}): ${(r.tail || r.err || '').trim().split('\n').filter(Boolean).pop() || 'no output'}`);
+          }
+          let raw = '';
+          try { raw = fs.readFileSync(prefix + '.vtt', 'utf-8'); fs.unlinkSync(prefix + '.vtt'); } catch (e) {}
+          return { tier, cues: parseWhisperVtt(raw, ss) };
+        };
+        let res = await transcribe(job.tier);
+        if (res === null) return null;
+        // Voice detection can swallow quiet dialogue: if a long slice came back nearly empty, retry once without it and keep the better result.
+        const covered = (cs) => cs.reduce((n, c) => n + Math.max(0, Math.min(c.e, start + len) - Math.max(c.s, start)), 0);
+        if (res.tier <= 1 && len >= 60 && covered(res.cues) < len * 0.12) {
+          job.msg = 'Few lines found · checking again';
+          const alt = await transcribe(2);
+          if (alt === null) return null;
+          if (covered(cleanCues(alt.cues)) > covered(cleanCues(res.cues))) res = alt;
         }
-        if (!alive() || fatal) return null;
-        if (r.code !== 0 && threadsEach > 2) { job.msg = 'Retrying with fewer threads'; r = await run(2, 2); }
-        if (!alive() || fatal) return null;
-        if (r.code !== 0) {
-          throw new Error(r.signal ? `whisper was killed (${r.signal}) - Android probably ran out of memory. Close other apps or use ggml-tiny.bin`
-            : `whisper failed (exit ${r.code}): ${(r.tail || r.err || '').trim().split('\n').filter(Boolean).pop() || 'no output'}`);
-        }
-        let raw = '';
-        try { raw = fs.readFileSync(prefix + '.vtt', 'utf-8'); fs.unlinkSync(prefix + '.vtt'); } catch (e) {}
-        cues = parseWhisperVtt(raw, start);
+        cues = res.cues.filter((c) => c.s >= start - 0.01 && (i === list.length - 1 || c.s < start + len));    // each chunk owns the cues that START inside it
+        cues = cleanCues(cues);
       }
       try { fs.unlinkSync(wav); } catch (e) {}
       try { fs.writeFileSync(cacheJson, JSON.stringify(cues)); } catch (e) {}
@@ -1261,6 +1359,7 @@ async function aiRun(job) {
   if (!alive()) return aiFinish(job, 'cancelled', 'Cancelled');
   if (fatal) { log('ERROR', `AI subtitles: ${fatal}`); return aiFinish(job, 'error', fatal); }
 
+  job.cues = cleanCues(job.cues);                // cross-chunk duplicates and overlaps
   const vtt = cuesToVtt(job.cues);
   if (vtt.length < 20) return aiFinish(job, 'error', 'No speech was detected in this audio track');
   try { fs.writeFileSync(aiCacheFile(job.key), vtt, 'utf-8'); fs.unlinkSync(aiPartFile(job.key)); } catch (e) {}
