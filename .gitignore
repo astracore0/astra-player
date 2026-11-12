@@ -9,3 +9,5 @@ public/cache_thumbs/
 .DS_Store
 cache/
 history.json.tmp
+models/
+*.zip

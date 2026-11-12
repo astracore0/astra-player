@@ -62,7 +62,6 @@ const btnGoPathInput = $('btnGoPathInput');
 const subPickerPathInputField = $('subPickerPathInputField');
 const btnGoSubPickerInput = $('btnGoSubPickerInput');
 
-const skipIntroBtn = $('skipIntroBtn');
 const rngSubDelay = $('rngSubDelay');
 const eqBassSlider = $('eqBass');
 const eqTrebleSlider = $('eqTreble');
@@ -96,7 +95,28 @@ let sessionRestoreDone = false;
 let subsOn = false;
 let subDelay = 0;          // seconds; + = subtitles appear later
 let playbackSpeed = 1;
-const SKIP_INTRO_SECONDS = 85;
+const PREF_DEFAULTS = { v: 4, seekStep: 10, quality: 'auto', preBuffer: 0, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
+const prefs = Object.assign({}, PREF_DEFAULTS);
+try {
+  const saved = JSON.parse(localStorage.getItem('astra_prefs') || '{}');
+  // v3: back to the v1.3 transcoder defaults (720p software x264, no pre-buffer wait) once.
+  if (saved.v !== 4) { delete saved.quality; delete saved.preBuffer; delete saved.hwEnc; }
+  Object.assign(prefs, saved);
+} catch (e) {}
+// v2: fullscreen always goes landscape by default (the old default was off)
+if (prefs.v !== 2 && prefs.v !== 4) { prefs.fsRotate = true; prefs.v = 2; try { localStorage.setItem('astra_prefs', JSON.stringify(prefs)); } catch (e) {} }
+function savePrefs() { try { localStorage.setItem('astra_prefs', JSON.stringify(prefs)); } catch (e) {} }
+let internalPause = false;
+let qualityOverride = null;
+// Auto resolution mode: start at 720p, step down when the phone cannot decode in real time.
+const AUTO_LEVELS = ['balanced', 'fast', 'low'];
+let autoLevel = 0;
+function effectiveQuality() { return qualityOverride || (prefs.quality === 'auto' ? AUTO_LEVELS[autoLevel] : prefs.quality); }
+// 10-bit HEVC is re-encoded live: always keep a 5 s head start so playback does not stutter right away.
+function needBuf() { return isTranscodingMode && isCurrentFile10Bit ? Math.max(5, prefs.preBuffer) : prefs.preBuffer; }
+let startWatch = null;
+let sleepTimerId = null;
+let sleepAtEnd = false;
 
 let audioCtx = null, audioSrcNode = null, delayNode = null, bassFilter = null, trebleFilter = null;
 let currentAudioOffset = 0.0;
@@ -121,6 +141,19 @@ function lsRemove(key) {
   try { localStorage.removeItem(key); } catch (e) {}
 }
 
+/* Per-episode memory: chosen subtitle and subtitle delay, kept for the last 300 episodes */
+const VP_KEY = 'astra_video_prefs';
+function vpAll() { try { return JSON.parse(lsGet(VP_KEY) || '{}') || {}; } catch (e) { return {}; } }
+function vpGet(p) { return (p && vpAll()[p]) || {}; }
+function vpSet(p, patch) {
+  if (!p) return;
+  const all = vpAll();
+  all[p] = Object.assign({}, all[p], patch, { t: Date.now() });
+  const keys = Object.keys(all);
+  if (keys.length > 300) keys.sort((a, b) => (all[a].t || 0) - (all[b].t || 0)).slice(0, keys.length - 300).forEach((k) => delete all[k]);
+  lsSet(VP_KEY, JSON.stringify(all));
+}
+
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 let toastTimer = null;
@@ -133,7 +166,7 @@ function showToast(message, ms = 3200) {
     el.setAttribute('role', 'status');
   }
   // Fullscreen only paints the fullscreen element's subtree, so move the toast into it.
-  const host = document.fullscreenElement || document.body;
+  const host = toastHost();
   if (el.parentNode !== host) host.appendChild(el);
   el.textContent = message;
   el.classList.add('show');
@@ -150,16 +183,35 @@ function formatTime(s) {
   return h > 0 ? `${h}:${m}:${sec}` : `${m}:${sec}`;
 }
 
+/* "[AWI] Darling in the FranXX - S01E22 [720p] [Multi-Audio]" -> { title, season, ep, tags } */
+function parseMedia(fileName) {
+  const base = String(fileName || '').replace(/\.(mp4|mkv|webm|avi|mov|ts|m4v)$/i, '');
+  const tags = [];
+  base.replace(/[\[(]([^\])]{2,40})[\])]/g, (m, inner) => {
+    if (/\d{3,4}p|audio|dub|\bsubs?\b|hevc|x26[45]|10.?bit|web|bd|blu|hdr/i.test(inner) && !/^\s*s\d+\s*e\d+\s*$/i.test(inner)) tags.push(inner.trim());
+    return m;
+  });
+  let s = base.replace(/[._]+/g, ' ');
+  let season = null, ep = null, m;
+  if ((m = /(?:^|[\s\[(])S(\d{1,2})\s*[ .\-]?E(?:P)?\s?(\d{1,4})(?=$|[\s\])\-])/i.exec(s)) || (m = /(?:^|[\s\[(])(\d{1,2})x(\d{2,4})(?=$|[\s\])])/i.exec(s))) {
+    season = +m[1]; ep = +m[2]; s = s.replace(m[0], ' ');
+  } else if ((m = /(?:^|[\s\[(\-])(?:episode|ep|e)\s*\.?\s*(\d{1,4})(?=$|[\s\])\-])/i.exec(s))) {
+    ep = +m[1]; s = s.replace(m[0], ' ');
+  } else if ((m = /\s-\s(\d{1,4})(?:v\d)?(?=\s|\[|\(|$)/.exec(s))) {
+    ep = +m[1]; s = s.replace(m[0], ' ');
+  }
+  let title = s.replace(/\[.*?\]|\(.*?\)/g, ' ')
+    .replace(/(\b1080p|\b720p|\b480p|AMZN|WEB-DL|\bAAC\b|H264|H\.264|x264|HEVC|x265|Multi Audio|Multimovies).*/i, '')
+    .replace(/[\[\]()]/g, ' ').replace(/\s[-\u2013:]\s/g, ' ').replace(/[\s\-\u2013:]+$/g, '').replace(/^[\s\-\u2013:]+/g, '').replace(/\s+/g, ' ').trim();
+  if (!title) title = base.replace(/[\[\]()._]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return { title, season, ep, tags };
+}
 function cleanMediaTitle(fileName) {
   if (!fileName) return 'Unknown Title';
-  const base = String(fileName).replace(/\.(mp4|mkv|webm|avi|mov|ts|m4v)$/i, '');
-  const cleaned = base
-    .replace(/\[.*?\]|\(.*?\)/g, '')
-    .replace(/(\.1080p|\.720p|\.480p|1080p|720p|480p|AMZN|WEB-DL|AAC|H264|H\.264|x264|HEVC|x265|Multi\.Audio|Multimovies).*/i, '')
-    .replace(/[\._\-]+/g, ' ')
-    .trim();
-  // Never end up with an empty title (e.g. "[Group] 1080p.mkv")
-  return cleaned || base.replace(/[\._\-]+/g, ' ').trim() || 'Unknown Title';
+  const p = parseMedia(fileName);
+  const pad = (n) => String(n).padStart(2, '0');
+  const label = p.ep == null ? '' : (p.season != null ? ` \u00b7 S${pad(p.season)}E${pad(p.ep)}` : ` \u00b7 Ep ${p.ep}`);
+  return (p.title || 'Unknown Title') + label;
 }
 
 // Real duration in seconds, or 0 when unknown (fragmented MP4 reports Infinity).
@@ -391,6 +443,16 @@ function loadSavedSettings() {
     if (saved.volume !== undefined) video.volume = clamp(Number(saved.volume), 0, 1);
     if (saved.muted !== undefined) video.muted = !!saved.muted;
     syncVolIcon();
+    if (saved.filterChip) {
+      document.querySelectorAll('#tabFilters [data-filter], #tabFilters [data-mine]').forEach((c) => c.classList.remove('active'));
+      const sel = saved.filterChip[0] === 'f' ? `[data-filter="${saved.filterChip.slice(2)}"]` : `[data-mine="${saved.filterChip.slice(2)}"]`;
+      const c = document.querySelector(`#tabFilters ${sel}`); if (c) c.classList.add('active');
+    }
+    try {
+      if (saved.aiLang && [...aiUi.lang.options].some((o) => o.value === saved.aiLang)) aiUi.lang.value = saved.aiLang;
+      if (saved.aiTr !== undefined) aiUi.tr.checked = !!saved.aiTr;
+      if (saved.aiMode) setAiMode(saved.aiMode, false);
+    } catch (e) {}
   } catch (e) {}
   updateSubtitleStyles();
   applyCombinedFilters();
@@ -422,6 +484,9 @@ function saveCurrentSettings() {
     volume: video.volume,
     muted: video.muted
   };
+  const chip = document.querySelector('#tabFilters [data-filter].active, #tabFilters [data-mine].active');
+  settings.filterChip = chip ? (chip.dataset.filter ? `f:${chip.dataset.filter}` : `m:${chip.dataset.mine}`) : '';
+  try { settings.aiLang = aiUi.lang.value; settings.aiTr = aiUi.tr.checked; settings.aiMode = aiMode; } catch (e) {}
   lsSet('astra_user_settings', JSON.stringify(settings));
 }
 
@@ -466,6 +531,7 @@ function updateSubtitleStyles() {
     shadows.push('2px 2px 4px rgba(0,0,0,0.9)', '0 0 8px rgba(0,0,0,0.8)');
   }
   subDisplayBox.style.textShadow = shadows.length > 0 ? shadows.join(', ') : 'none';
+  if (typeof syncTopBoxStyle === 'function') syncTopBoxStyle();
   saveCurrentSettings();
 }
 
@@ -487,14 +553,41 @@ function formatCueText(raw) {
   )).join('');
 }
 
+const subPosLayer = document.createElement('div');
+subPosLayer.className = 'sub-pos-layer';
+subDisplayBox.parentNode.insertBefore(subPosLayer, subDisplayBox.nextSibling);
+
+// Top lines (second speaker, songs) get their own box so they can show together with the bottom line.
+const subTopBox = subDisplayBox.cloneNode(false);
+subTopBox.id = 'subTopBox';
+subDisplayBox.parentNode.insertBefore(subTopBox, subDisplayBox);
+function syncTopBoxStyle() {
+  ['fontSize', 'transform', 'fontWeight', 'color', 'backgroundColor', 'padding', 'borderRadius', 'textShadow'].forEach((k) => { subTopBox.style[k] = subDisplayBox.style[k]; });
+}
+syncTopBoxStyle();
+
 function hideSubtitle() {
   activeSubSignature = '';
   subDisplayBox.style.display = 'none';
   subDisplayBox.innerHTML = '';
+  subTopBox.style.display = 'none';
+  subTopBox.innerHTML = '';
+  subPosLayer.textContent = '';
 }
 
 let activeSubSignature = '';
 let lastSubCheck = 0;
+const POS_RE = /^<pos:(-?[\d.]+),(-?[\d.]+),(\d),([\d.]*),([0-9a-f]*),([0-9a-f]*)>/i;
+
+// Where the picture really is inside the player (it is letter-boxed), so ASS coordinates land on the picture.
+function pictureRect() {
+  const host = subPosLayer.parentNode;
+  const W = host.clientWidth, H = host.clientHeight;
+  const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+  const sc = Math.min(W / vw, H / vh);
+  const w = vw * sc, h = vh * sc;
+  return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+}
 
 // Cues are matched against the position in the ORIGINAL file, so subtitles stay
 // in sync after a seek in a transcoded stream (where video.currentTime restarts at 0).
@@ -509,37 +602,55 @@ function updateSubtitleDisplay() {
   const cues = track.cues;
   let topText = '';
   let bottomText = '';
+  const placed = [];
 
   for (let i = 0; i < cues.length; i++) {
     const cue = cues[i];
     if (cue.startTime > t || cue.endTime <= t) continue;
     const raw = cue.text || '';
-    if (raw.includes('<position:top>')) {
+    const pm = POS_RE.exec(raw);
+    if (pm) {
+      placed.push({ x: +pm[1], y: +pm[2], an: +pm[3], fs: pm[4] ? +pm[4] : 0, c1: pm[5], c3: pm[6], html: formatCueText(raw.slice(pm[0].length)) });
+    } else if (raw.includes('<position:top>')) {
       topText += formatCueText(raw.replace(/<position:top>/g, '')) + '<br>';
     } else {
       bottomText += formatCueText(raw) + '<br>';
     }
   }
 
-  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}`;
+  const rect = placed.length ? pictureRect() : null;
+  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
   if (signature === activeSubSignature) return;
 
-  if (!topText && !bottomText) {
+  if (!topText && !bottomText && !placed.length) {
     hideSubtitle();
     return;
   }
 
   activeSubSignature = signature;
-  if (topText) {
-    subDisplayBox.style.bottom = 'auto';
-    subDisplayBox.style.top = '10%';
-    subDisplayBox.innerHTML = topText;
-  } else {
-    subDisplayBox.style.top = 'auto';
-    subDisplayBox.style.bottom = '52px';
-    subDisplayBox.innerHTML = bottomText;
-  }
-  subDisplayBox.style.display = 'inline-block';
+  subTopBox.style.bottom = 'auto'; subTopBox.style.top = '8%';
+  subTopBox.innerHTML = topText;
+  subTopBox.style.display = topText ? 'inline-block' : 'none';
+  subDisplayBox.style.top = 'auto'; subDisplayBox.style.bottom = '52px';
+  subDisplayBox.innerHTML = bottomText;
+  subDisplayBox.style.display = bottomText ? 'inline-block' : 'none';
+
+  subPosLayer.textContent = '';
+  placed.forEach((p) => {
+    const el = document.createElement('span');
+    el.className = 'sub-pos';
+    el.innerHTML = p.html;
+    const col = p.an % 3 === 1 ? 0 : p.an % 3 === 2 ? -50 : -100;      // left / centre / right anchor
+    const row = p.an >= 7 ? 0 : p.an >= 4 ? -50 : -100;               // top / middle / bottom anchor
+    el.style.left = `${rect.x + p.x / 100 * rect.w}px`;
+    el.style.top = `${rect.y + p.y / 100 * rect.h}px`;
+    el.style.transform = `translate(${col}%, ${row}%)`;
+    el.style.fontSize = `${Math.max(10, (p.fs || 5) / 100 * rect.h)}px`;
+    if (p.c1) el.style.color = `#${p.c1}`;
+    const o = p.c3 ? `#${p.c3}` : '#000';
+    el.style.textShadow = `-1px -1px 0 ${o}, 1px -1px 0 ${o}, -1px 1px 0 ${o}, 1px 1px 0 ${o}, 0 0 6px ${o}`;
+    subPosLayer.appendChild(el);
+  });
 }
 
 function setupSubtitleCues() {
@@ -581,10 +692,13 @@ function buildSubtitleList(tracks, relPath) {
     selectOptRow(subTrackList, offRow);
     resetSubtitleState();
     preferredSubLang = '';
+    vpSet(relPath, { sub: 'off' });
     saveCurrentSettings();
   };
   subTrackList.appendChild(offRow);
 
+  const vp = vpGet(relPath);
+  const forcedTrack = vp.sub && vp.sub.startsWith('t:') ? vp.sub.slice(2) : null;
   let autoChoose = null;
   tracks.forEach((s) => {
     const row = document.createElement('div');
@@ -594,6 +708,7 @@ function buildSubtitleList(tracks, relPath) {
     const choose = (silent) => {
       selectOptRow(subTrackList, row);
       preferredSubLang = s.lang && s.lang !== 'und' ? s.lang : '';
+      if (!silent) vpSet(relPath, { sub: `t:${s.streamIndex}` });
       saveCurrentSettings();
       if (!silent) showToast('Loading subtitle…', 1500);
       selectSubtitleUrl(`/api/subs/stream?file=${encodeURIComponent(relPath)}&trackIndex=${s.streamIndex}`);
@@ -602,10 +717,12 @@ function buildSubtitleList(tracks, relPath) {
     subTrackList.appendChild(row);
 
     // Keep the subtitle language chosen on the previous episode.
-    if (!autoChoose && preferredSubLang && s.lang === preferredSubLang) autoChoose = choose;
+    if (forcedTrack !== null) { if (String(s.streamIndex) === forcedTrack) autoChoose = choose; }
+    else if (vp.sub !== 'off' && vp.sub !== 'ai' && !autoChoose && preferredSubLang && s.lang === preferredSubLang) autoChoose = choose;
   });
 
   if (autoChoose) autoChoose(true);
+  aiOnEpisodeLoaded();
 }
 
 function addExternalSubtitle(name, fullPath) {
@@ -620,11 +737,13 @@ function addExternalSubtitle(name, fullPath) {
     row.onclick = () => {
       selectOptRow(subTrackList, target);
       selectSubtitleUrl(url);
+      vpSet(activeVideoPath, { sub: `f:${fullPath}` });
     };
     subTrackList.appendChild(row);
   }
   selectOptRow(subTrackList, row);
   selectSubtitleUrl(url);
+  vpSet(activeVideoPath, { sub: `f:${fullPath}` });
 }
 
 /* ------------------------------------------------------------------ */
@@ -832,7 +951,7 @@ $('btnResetFilters').addEventListener('click', () => {
 
 document.querySelectorAll('[data-filter]').forEach((btn) => {
   btn.onclick = () => {
-    document.querySelectorAll('[data-filter]').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('[data-filter],[data-mine]').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     const f = btn.dataset.filter;
     if (f === 'vivid') {
@@ -861,6 +980,49 @@ document.querySelectorAll('[data-filter]').forEach((btn) => {
   };
 });
 
+/* Saved (named) filters ------------------------------------------------ */
+const FILTERS_KEY = 'astra_saved_filters';
+function loadSavedFilters() { try { const v = JSON.parse(localStorage.getItem(FILTERS_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } }
+function storeSavedFilters(list) { try { localStorage.setItem(FILTERS_KEY, JSON.stringify(list)); } catch (e) {} }
+function currentFilterValues() {
+  return { b: +$('rngBright').value, c: +$('rngContrast').value, s: +$('rngSat').value, h: +$('rngHue').value, w: +$('rngWarm').value, sh: +$('sharpStrength').value };
+}
+function applyFilterValues(v) {
+  $('rngBright').value = v.b; $('rngContrast').value = v.c; $('rngSat').value = v.s; $('rngHue').value = v.h; $('rngWarm').value = v.w;
+  $('sharpStrength').value = v.sh; currentSharpness = v.sh / 100; $('lblSharp').textContent = v.sh > 0 ? `${v.sh}%` : 'Off';
+  applyCombinedFilters();
+}
+function renderSavedFilters() {
+  const box = $('savedFilters'), list = loadSavedFilters();
+  $('savedFiltersEmpty').style.display = list.length ? 'none' : '';
+  box.textContent = '';
+  list.forEach((f, i) => {
+    const b = document.createElement('button');
+    b.className = 'chip-preset'; b.dataset.mine = String(i);
+    const nm = document.createElement('span'); nm.textContent = f.name;
+    const x = document.createElement('span'); x.className = 'x'; x.textContent = '\u00d7'; x.title = 'Delete';
+    b.append(nm, x);
+    b.onclick = (e) => {
+      if (e.target === x) { const l = loadSavedFilters(); l.splice(i, 1); storeSavedFilters(l); renderSavedFilters(); return; }
+      document.querySelectorAll('[data-filter],[data-mine]').forEach((c) => c.classList.remove('active'));
+      b.classList.add('active'); applyFilterValues(f);
+      showToast(`Filter: ${f.name}`, 1200);
+    };
+    box.appendChild(b);
+  });
+}
+$('btnSaveFilter').onclick = () => {
+  const inp = $('filterName'); const name = inp.value.trim().slice(0, 24);
+  if (!name) { inp.focus(); showToast('Type a name for this filter', 1500); return; }
+  const list = loadSavedFilters().filter((f) => f.name.toLowerCase() !== name.toLowerCase());
+  list.push({ name, ...currentFilterValues() });
+  storeSavedFilters(list.slice(-12)); inp.value = ''; renderSavedFilters();
+  showToast(`Saved filter \u201c${name}\u201d`, 1500);
+};
+$('filterName').addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') $('btnSaveFilter').click(); });
+$('filterName').addEventListener('keyup', (e) => e.stopPropagation());
+renderSavedFilters();
+
 /* ------------------------------------------------------------------ */
 /* Touch gestures                                                      */
 /* ------------------------------------------------------------------ */
@@ -868,13 +1030,15 @@ const tapTracker = { left: 0, center: 0, right: 0 };
 function triggerRipple(id) {
   const el = $(id);
   if (!el) return;
+  if (id === 'rippleLeft') el.textContent = `-${prefs.seekStep}s`;
+  if (id === 'rippleRight') el.textContent = `+${prefs.seekStep}s`;
   el.classList.remove('trigger');
   void el.offsetWidth;
   el.classList.add('trigger');
   setTimeout(() => el.classList.remove('trigger'), 300);
 }
 
-function togglePlayPause() {
+let togglePlayPause = function () {
   if (video.paused) {
     initWebAudio();
     notifyStreamResume();
@@ -883,7 +1047,7 @@ function togglePlayPause() {
     video.pause();
     notifyStreamPause();
   }
-}
+};
 
 function handleDoubleTap(side) {
   if (isScreenLocked) {
@@ -897,10 +1061,10 @@ function handleDoubleTap(side) {
     const dur = getDuration() || 9999;
 
     if (side === 'left') {
-      seekToTargetSecond(Math.max(0, curTime - 10));
+      seekToTargetSecond(Math.max(0, curTime - prefs.seekStep));
       triggerRipple('rippleLeft');
     } else if (side === 'right') {
-      seekToTargetSecond(Math.min(dur - 2, curTime + 10));
+      seekToTargetSecond(Math.min(dur - 2, curTime + prefs.seekStep));
       triggerRipple('rippleRight');
     } else if (side === 'center') {
       togglePlayPause();
@@ -933,10 +1097,23 @@ $('touchRight').onclick = (e) => { e.stopPropagation(); handleDoubleTap('right')
 function transcodeUrl(sec) {
   return `/stream/transcode?file=${encodeURIComponent(activeVideoPath)}`
     + `&audioTrack=${encodeURIComponent(activeAudioStreamIndex)}`
-    + `&startTime=${sec}&is10Bit=${isCurrentFile10Bit ? '1' : '0'}`;
+    + `&startTime=${sec}&is10Bit=${isCurrentFile10Bit ? '1' : '0'}&q=${effectiveQuality()}${prefs.hwEnc === 'auto' ? '&enc=hw' : ''}`;
 }
 
+function updateQualityReadout() {
+  const qv = $('qualityValue'), qt = $('qualityType');
+  if (!qv || !qt) return;
+  const h = video.videoHeight;
+  qv.textContent = h > 0 ? `${h}p` : (playerResBadge.textContent || 'Auto');
+  const ten = !!isCurrentFile10Bit;
+  let label;
+  if (isTranscodingMode) label = ten ? '10-bit \u00b7 Decoding' : (compatMode ? '8-bit \u00b7 Compat' : '8-bit \u00b7 Transcode');
+  else label = ten ? '10-bit \u00b7 Native' : '8-bit \u00b7 Direct';
+  qt.textContent = label;
+  qt.className = `q-type ${ten ? 'hi' : 'ok'}`;
+}
 function updateStreamBadges() {
+  setTimeout(updateQualityReadout, 0);
   if (isTranscodingMode) {
     streamModeBadge.textContent = compatMode ? 'Compat Transcode' : (isCurrentFile10Bit ? '10-Bit Transcode' : 'Direct Audio Pipe');
     if (sourceModePill) sourceModePill.textContent = 'Transcode Stream';
@@ -944,6 +1121,21 @@ function updateStreamBadges() {
     streamModeBadge.textContent = 'Native Direct (8-Bit)';
     if (sourceModePill) sourceModePill.textContent = 'Native Stream';
   }
+}
+
+function armStartWatch() {
+  clearInterval(startWatch);
+  const t0 = Date.now();
+  const token = playToken;
+  startWatch = setInterval(() => {
+    if (token !== playToken || !isTranscodingMode || video.readyState >= 1) { clearInterval(startWatch); return; }
+    const s = Math.floor((Date.now() - t0) / 1000);
+    probeLoadingText.textContent = `Starting transcoder… ${s}s`;
+    if (s === 75) {
+      clearInterval(startWatch);
+      showToast('Still no video data. Try another file or check ffmpeg.', 6000);
+    }
+  }, 1000);
 }
 
 async function startTranscodeAt(sec, label = 'Starting stream...') {
@@ -968,6 +1160,7 @@ async function startTranscodeAt(sec, label = 'Starting stream...') {
   updateStreamBadges();
   video.src = transcodeUrl(sec);
   video.load();
+  armStartWatch();
   video.play().catch(() => {});
 }
 
@@ -1034,8 +1227,8 @@ function setupMediaSessionHandlers() {
   set('pause', () => { video.pause(); });
   set('previoustrack', () => playAdjacentEpisode(-1));
   set('nexttrack', () => playAdjacentEpisode(1));
-  set('seekbackward', () => seekToTargetSecond(Math.max(0, absoluteTime() - 10)));
-  set('seekforward', () => seekToTargetSecond(absoluteTime() + 10));
+  set('seekbackward', () => seekToTargetSecond(Math.max(0, absoluteTime() - prefs.seekStep)));
+  set('seekforward', () => seekToTargetSecond(absoluteTime() + prefs.seekStep));
 }
 setupMediaSessionHandlers();
 
@@ -1050,11 +1243,13 @@ function playAdjacentEpisode(step, auto = false) {
 }
 
 async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
+  autoLevel = 0; autoSlowHits = 0;
   const token = ++playToken;
   seekTime = Number(seekTime) > 0 ? Number(seekTime) : 0;
 
   // Fresh state for the new file (nothing may leak over from the previous episode).
   activeVideoPath = relPath;
+  setChapters([]);
   nativeFallbackTried = false;
   compatMode = false;
   isCurrentFile10Bit = false;
@@ -1084,6 +1279,7 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   renderFloatingEpisodes();
   renderInlinePlaylist();
   updateMediaSession();
+  syncDeepLink(relPath);
 
   probeLoadingText.textContent = 'Scanning audio & subtitles...';
   playerBufferingIndicator.classList.add('show');
@@ -1103,6 +1299,7 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
     currentExplicitDuration = Number(meta.duration) || 0;
     playerDurationBadge.textContent = formatTime(currentExplicitDuration);
     isCurrentFile10Bit = !!meta.is10BitHevc;
+    setChapters(meta.chapters || []);
 
     audioTrackList.innerHTML = '';
     let selectedTrackIndex = 0;
@@ -1140,7 +1337,9 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
     isTranscodingMode = true;
     transcodeBaseOffset = seekTime;
     updateStreamBadges();
+    probeLoadingText.textContent = 'Starting transcoder…';
     video.src = transcodeUrl(seekTime);
+    armStartWatch();
   } else {
     isTranscodingMode = false;
     updateStreamBadges();
@@ -1166,7 +1365,9 @@ function finalizePlayback(seekTime) {
     playerDurationBadge.textContent = formatTime(dur);
     const h = video.videoHeight;
     playerResBadge.textContent = h >= 1080 ? '1080p' : h >= 720 ? '720p' : h > 0 ? `${h}p` : 'Auto';
-    video.play().catch(() => { manualCenterPlay.style.display = 'flex'; });
+    updateQualityReadout();
+    if (isTranscodingMode && needBuf() > 0 && !internalPause) { video.pause(); startRebuffer(); }
+    else video.play().catch(() => { manualCenterPlay.style.display = 'flex'; });
     resetHideTimer();
   };
 }
@@ -1176,6 +1377,7 @@ function finalizePlayback(seekTime) {
 /* ------------------------------------------------------------------ */
 video.addEventListener('canplay', () => { playerBufferingIndicator.classList.remove('show'); });
 video.addEventListener('waiting', () => {
+  if (isTranscodingMode && !video.paused && !internalPause && needBuf() > 0 && !isScrubbing) { startRebuffer(); return; }
   if (!video.paused) {
     probeLoadingText.textContent = 'Buffering...';
     playerBufferingIndicator.classList.add('show');
@@ -1187,11 +1389,13 @@ video.addEventListener('play', () => {
   notifyStreamResume(); // wakes a paused (frozen) transcoder no matter how playback started
 });
 video.addEventListener('playing', () => {
+  armPictureWatch();
   playerBufferingIndicator.classList.remove('show');
   manualCenterPlay.style.display = 'none';
   updatePlayButtonIcon(true);
 });
 video.addEventListener('pause', () => {
+  if (internalPause) return;
   updatePlayButtonIcon(false);
   notifyStreamPause();
 });
@@ -1207,22 +1411,38 @@ video.addEventListener('ended', () => {
   if (activeVideoPath && dur) {
     syncHistoryToServer(activeVideoPath, playerCurrentTitle.textContent, dur, dur);
   }
-  playAdjacentEpisode(1, true); // auto-play next episode
+  if (sleepAtEnd) { sleepAtEnd = false; setSleep(0); showToast('Sleep timer: stopped', 3000); return; }
+  if (prefs.autoNext) playAdjacentEpisode(1, true); // auto-play next episode
 });
 
+function fallbackToTranscode(msg) {
+  if (isTranscodingMode || nativeFallbackTried) return false;
+  nativeFallbackTried = true;
+  compatMode = true;
+  isCurrentFile10Bit = true; // forces full video transcode to H.264
+  showToast(msg, 4000);
+  startTranscodeAt(video.currentTime || 0);
+  return true;
+}
+// Some phones "play" HEVC as sound only (decoder missing): no picture => switch to the transcoder.
+let pictureWatch = null;
+function armPictureWatch() {
+  clearTimeout(pictureWatch);
+  if (isTranscodingMode || nativeFallbackTried) return;
+  const token = playToken;
+  pictureWatch = setTimeout(() => {
+    if (token !== playToken || isTranscodingMode || video.paused || video.currentTime < 0.5) return;
+    let frames = 1;
+    try { const q = video.getVideoPlaybackQuality && video.getVideoPlaybackQuality(); if (q) frames = q.totalVideoFrames; } catch (e) {}
+    if (video.videoWidth === 0 || frames === 0) fallbackToTranscode('No picture from this video — switching to compatibility transcode');
+  }, 3500);
+}
 video.addEventListener('error', () => {
   if (!activeVideoPath || !video.getAttribute('src')) return;
   playerBufferingIndicator.classList.remove('show');
 
   // The browser could not play the file natively (HEVC, odd codecs, ...): retry once through the transcoder.
-  if (!isTranscodingMode && !nativeFallbackTried) {
-    nativeFallbackTried = true;
-    compatMode = true;
-    isCurrentFile10Bit = true; // forces full video transcode to H.264
-    showToast('Format not supported natively — switching to compatibility transcode', 4000);
-    startTranscodeAt(video.currentTime || 0);
-    return;
-  }
+  if (fallbackToTranscode('Format not supported natively — switching to compatibility transcode')) return;
   showToast('Playback failed. The file may be missing or unsupported.', 4500);
 });
 
@@ -1266,6 +1486,7 @@ video.addEventListener('timeupdate', () => {
 
   updateBufferLine();
   updateSubtitleDisplay();
+  onChapterTick(currentExactSec);
 
   const currentSec = Math.floor(currentExactSec);
   if (currentSec > 0 && Math.abs(currentSec - lastRecordedTime) >= 3 && activeVideoPath) {
@@ -1289,6 +1510,7 @@ timelineSlider.addEventListener('input', () => {
   const target = (timelineSlider.value / 100) * dur;
   trackPlayed.style.width = `${timelineSlider.value}%`;
   timeLabel.textContent = `${formatTime(target)} / ${formatTime(dur)}`;
+  const ch = chapterAt(target); if (chapterLabel) chapterLabel.textContent = ch ? ch.title : '';
 });
 timelineSlider.addEventListener('change', () => {
   const wasScrubbing = isScrubbing;
@@ -1304,19 +1526,63 @@ timelineSlider.addEventListener('pointercancel', () => { isScrubbing = false; })
 /* ------------------------------------------------------------------ */
 /* Player controls                                                     */
 /* ------------------------------------------------------------------ */
+let fakeFs = false;          // CSS rotation active (works with phone auto-rotate OFF)
+let switchingFs = false;
+function toastHost() {
+  if (fakeFs) return playerWrapper;
+  const f = document.fullscreenElement;
+  return (f && f !== document.documentElement) ? f : document.body;
+}
+let rotatedLandscape = false;
+function setFakeFs(on) {
+  fakeFs = on;
+  playerWrapper.classList.toggle('fake-fs', on);
+  document.body.classList.toggle('fake-fs-on', on);
+  const t = $('astraToast');
+  if (t) { const host = toastHost(); if (t.parentNode !== host) host.appendChild(t); }
+  resetHideTimer();
+}
+async function enterLandscape() {
+  rotatedLandscape = true;
+  if (screen.orientation && screen.orientation.lock) {
+    try { await screen.orientation.lock('landscape'); } catch (e) { /* refused: fall through to CSS rotation */ }
+  }
+  await new Promise((r) => setTimeout(r, 250));
+  if (window.innerHeight > window.innerWidth) {
+    // Still portrait: Chrome forbids transforms on the fullscreen element itself, so make the
+    // whole page the fullscreen element and rotate the player inside it.
+    switchingFs = true;
+    try {
+      if (document.fullscreenElement === playerWrapper) await document.exitFullscreen();
+      if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+    } catch (e) { /* fullscreen refused: still rotate inside the page */ }
+    switchingFs = false;
+    setFakeFs(true);
+  }
+}
+function leaveLandscape() {
+  rotatedLandscape = false;
+  setFakeFs(false);
+  try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (e) {}
+}
 async function toggleFullscreen() {
   if (isScreenLocked) return;
-  if (!document.fullscreenElement) {
+  if (!document.fullscreenElement && !fakeFs) {
     await playerWrapper.requestFullscreen().catch(() => {});
-    if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+    if (prefs.fsRotate) await enterLandscape();
   } else {
-    await document.exitFullscreen().catch(() => {});
+    leaveLandscape();
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
   }
 }
 fsBtn.onclick = toggleFullscreen;
+// Phone physically rotated (or window resized) while the CSS rotation was on: drop it.
+window.addEventListener('resize', () => { if (fakeFs && window.innerWidth > window.innerHeight) { setFakeFs(false); rotatedLandscape = false; } });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && fakeFs) leaveLandscape(); });
 
 // Also covers leaving fullscreen with the system back gesture.
 document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && !switchingFs) { rotatedLandscape = false; setFakeFs(false); }
   if (!document.fullscreenElement && screen.orientation && screen.orientation.unlock) {
     try { screen.orientation.unlock(); } catch (e) {}
   }
@@ -1365,26 +1631,18 @@ function stepSpeed(dir) {
 }
 
 /* ---- Subtitle delay ---- */
-function setSubDelay(sec, announce = false) {
+function setSubDelay(sec, announce = false, persist = announce) {
   subDelay = clamp(Math.round((Number(sec) || 0) * 10) / 10, -10, 10);
   if (rngSubDelay) rngSubDelay.value = subDelay;
   const lbl = $('lblSubDelay');
   if (lbl) lbl.textContent = `${subDelay > 0 ? '+' : ''}${subDelay.toFixed(1)}s`;
+  if (persist && activeVideoPath) vpSet(activeVideoPath, { delay: subDelay });
   activeSubSignature = '\u0000';
   updateSubtitleDisplay();
   if (announce) showToast(`Subtitle delay ${subDelay > 0 ? '+' : ''}${subDelay.toFixed(1)}s`, 1200);
 }
-if (rngSubDelay) rngSubDelay.addEventListener('input', (e) => setSubDelay(e.target.value));
+if (rngSubDelay) rngSubDelay.addEventListener('input', (e) => setSubDelay(e.target.value, false, true));
 
-/* ---- Skip intro ---- */
-function skipIntro() {
-  const dur = getDuration() || 99999;
-  seekToTargetSecond(Math.min(dur - 2, absoluteTime() + SKIP_INTRO_SECONDS));
-  showToast(`Skipped ${SKIP_INTRO_SECONDS}s`, 1200);
-}
-if (skipIntroBtn) {
-  skipIntroBtn.onclick = (e) => { e.stopPropagation(); if (!isScreenLocked) skipIntro(); };
-}
 volBtn.onclick = () => {
   if (isScreenLocked) return;
   toggleMute();
@@ -1392,12 +1650,12 @@ volBtn.onclick = () => {
 
 rwBtn.onclick = () => {
   if (isScreenLocked) return;
-  seekToTargetSecond(Math.max(0, absoluteTime() - 10));
+  seekToTargetSecond(Math.max(0, absoluteTime() - prefs.seekStep));
 };
 ffBtn.onclick = () => {
   if (isScreenLocked) return;
   const dur = getDuration() || 99999;
-  seekToTargetSecond(Math.min(dur - 2, absoluteTime() + 10));
+  seekToTargetSecond(Math.min(dur - 2, absoluteTime() + prefs.seekStep));
 };
 bigPlayBtn.onclick = () => {
   if (isScreenLocked) return;
@@ -1427,6 +1685,19 @@ lockBtn.onclick = (e) => {
   }
 };
 
+/* ---- every panel closes: ×, tap outside, Escape ---- */
+const panelScrim = $('panelScrim');
+const slidePanels = () => [settingsModal, playerEpisodesDrawer, $('chaptersPanel')];
+function closePanels() { slidePanels().forEach((p) => p && p.classList.remove('open')); }
+function syncScrim() { panelScrim.classList.toggle('show', slidePanels().some((p) => p && p.classList.contains('open'))); }
+if (panelScrim) {
+  panelScrim.addEventListener('click', (e) => { e.stopPropagation(); closePanels(); });
+  const mo = new MutationObserver(syncScrim);
+  slidePanels().forEach((p) => p && mo.observe(p, { attributes: true, attributeFilter: ['class'] }));
+}
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanels(); });
+const closeSettingsBtn = $('closeSettingsBtn');
+if (closeSettingsBtn) closeSettingsBtn.onclick = (e) => { e.stopPropagation(); settingsModal.classList.remove('open'); };
 settingsBtn.onclick = () => {
   if (isScreenLocked) return;
   playerEpisodesDrawer.classList.remove('open');
@@ -1450,7 +1721,7 @@ function resetHideTimer() {
 
   if (!video.paused) {
     hideTimer = setTimeout(() => {
-      if (settingsModal.classList.contains('open') || playerEpisodesDrawer.classList.contains('open')) return;
+      if (settingsModal.classList.contains('open') || playerEpisodesDrawer.classList.contains('open') || $('chaptersPanel').classList.contains('open')) return;
       topOverlay.classList.add('hidden');
       bottomOverlay.classList.add('hidden');
     }, 5000);
@@ -1460,7 +1731,7 @@ function resetHideTimer() {
 // Touch taps on the video are handled by the tap zones (show/hide toggle). If the wrapper also
 // revealed the controls on touchstart, the zone's single-tap toggle would instantly hide them again.
 playerWrapper.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') resetHideTimer(); });
-[topOverlay, bottomOverlay, settingsModal, playerEpisodesDrawer].forEach((el) => {
+[topOverlay, bottomOverlay, settingsModal, playerEpisodesDrawer, $('chaptersPanel')].forEach((el) => {
   ['pointerdown', 'click'].forEach((evt) => el.addEventListener(evt, resetHideTimer));
 });
 
@@ -1491,10 +1762,10 @@ document.addEventListener('keydown', (e) => {
     case 'K': togglePlayPause(); break;
     case 'ArrowLeft':
     case 'j':
-    case 'J': seekToTargetSecond(Math.max(0, absoluteTime() - 10)); break;
+    case 'J': seekToTargetSecond(Math.max(0, absoluteTime() - prefs.seekStep)); break;
     case 'ArrowRight':
     case 'l':
-    case 'L': seekToTargetSecond(Math.min((getDuration() || 99999) - 2, absoluteTime() + 10)); break;
+    case 'L': seekToTargetSecond(Math.min((getDuration() || 99999) - 2, absoluteTime() + prefs.seekStep)); break;
     case 'ArrowUp': video.volume = clamp(video.volume + 0.1, 0, 1); break;
     case 'ArrowDown': video.volume = clamp(video.volume - 0.1, 0, 1); break;
     case 'm':
@@ -1505,8 +1776,11 @@ document.addEventListener('keydown', (e) => {
     case 'N': playAdjacentEpisode(1); break;
     case 'p':
     case 'P': playAdjacentEpisode(-1); break;
-    case 's':
-    case 'S': skipIntro(); break;
+    case 'Escape': settingsModal.classList.remove('open'); playerEpisodesDrawer.classList.remove('open'); $('chaptersPanel').classList.remove('open'); break;
+    case ',': stepChapter(-1); break;
+    case '.': stepChapter(1); break;
+    case 'c':
+    case 'C': toggleChaptersPanel(); break;
     case ']': stepSpeed(1); break;
     case '[': stepSpeed(-1); break;
     case 'z':
@@ -1860,29 +2134,88 @@ setInterval(pulseHardwareGraph, 500);
 /* ------------------------------------------------------------------ */
 /* Navigation                                                          */
 /* ------------------------------------------------------------------ */
+/* Deep links: #player/<series>/<season>/<episode>  e.g. #player/The+Eminence+in+Shadow/season-1/episode-3 */
+const urlSlug = (x) => encodeURIComponent(String(x).trim().replace(/\s+/g, '+')).replace(/%2B/gi, '+');
+const unSlug = (x) => { const t = String(x || '').replace(/\+/g, ' '); try { return decodeURIComponent(t); } catch (e) { return t; } };
+const normSlug = (x) => unSlug(x).toLowerCase().replace(/[\s_\-.]+/g, ' ').trim();   // 'anime+name', 'anime_name', 'Anime-Name' all match
+function seasonSlugOf(key) {
+  const tokens = key === 'Anime Root' ? [] : key.split(' / ').slice(1);
+  if (!tokens.length) return 'season-1';
+  const m = /(?:season|\bs)[\s._-]*0*(\d{1,2})\b/i.exec(tokens.join(' '));
+  return m ? `season-${Number(m[1])}` : urlSlug(tokens.join(' - ')).toLowerCase();
+}
+function deepLinkFor(relPath) {
+  if (!relPath) return '';
+  const key = currentPathTokens.join(' / ') || 'Anime Root';
+  const eps = fullLibrary[key];
+  if (!eps) return '';
+  const idx = eps.findIndex((e) => (e.relPath || e.fullPath) === relPath);
+  if (idx < 0) return '';
+  const series = key === 'Anime Root' ? 'Anime Root' : key.split(' / ')[0];
+  const n = parseMedia(eps[idx].name).ep;
+  const unique = n != null && eps.filter((e) => parseMedia(e.name).ep === n).length === 1;
+  return `#player/${urlSlug(series)}/${seasonSlugOf(key)}/episode-${unique ? n : idx + 1}`;
+}
+function resolveDeepLink(raw) {
+  const parts = String(raw || '').replace(/^#/, '').split('/');
+  if (parts[0] !== 'player' || parts.length < 4) return null;
+  const wantSeries = normSlug(parts[1]), wantSeason = String(parts[2]).toLowerCase(), m = /^episode-(\d+)$/i.exec(parts[3]);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const key = Object.keys(fullLibrary).find((k) => normSlug(urlSlug(k === 'Anime Root' ? 'Anime Root' : k.split(' / ')[0])) === wantSeries && seasonSlugOf(k) === wantSeason);
+  if (!key) return null;
+  const eps = fullLibrary[key];
+  const byNum = eps.filter((e) => parseMedia(e.name).ep === n);
+  const ep = byNum.length === 1 ? byNum[0] : eps[n - 1];
+  return ep ? { key, ep } : null;
+}
+function syncDeepLink(relPath) {
+  const h = deepLinkFor(relPath);
+  if (h && window.location.hash !== h) { try { history.replaceState(null, '', h); } catch (e) {} }
+}
+let pendingDeepLink = null;
+async function openDeepLink(raw) {
+  const r = resolveDeepLink(raw);
+  if (!r) { showToast('That episode was not found in your library', 3500); navigateTo('home'); return; }
+  const path = r.ep.relPath || r.ep.fullPath;
+  if (currentView === 'player' && activeVideoPath === path) return;
+  currentPathTokens = r.key === 'Anime Root' ? [] : r.key.split(' / ');
+  currentVideoList = fullLibrary[r.key];
+  const h = historyCache[path];
+  navigateTo('player');
+  renderInlinePlaylist();
+  inspectMediaAndPlay(r.ep.name, path, h ? resumeStartTime(h) : 0);
+}
+
 function navigateTo(hash) {
-  let target = String(hash || '').replace(/^#/, '') || 'home';
+  const raw = String(hash || '').replace(/^#/, '') || 'home';
+  let target = raw.split('/')[0];
   if (!$(`view-${target}`)) target = 'home';
   if (target !== 'player') triggerAutoPause();
 
   currentView = target;
-  if (window.location.hash !== `#${target}`) window.location.hash = target;
+  const keepDeep = target === 'player' && /^#player\//.test(window.location.hash);
+  if (!keepDeep && window.location.hash !== `#${target}`) window.location.hash = target;
   document.querySelectorAll('.page-view').forEach((p) => p.classList.remove('active'));
   document.querySelectorAll('.drawer-item').forEach((d) => d.classList.remove('active'));
 
   const view = $(`view-${target}`);
   const nav = document.querySelector(`.drawer-item[data-hash="${target}"]`);
   if (view) view.classList.add('active');
+  window.scrollTo(0, 0); // each page opens at its top (the player must never land off-screen)
   if (nav) nav.classList.add('active');
   $('sideDrawer').classList.remove('open');
   $('menuOverlay').classList.remove('open');
 
   if (target === 'home') { renderDashboard(homeQuickSearch ? homeQuickSearch.value.trim() : ''); renderHistory(); }
-  if (target === 'player') renderInlinePlaylist();
+  if (target === 'player') { renderInlinePlaylist(); if (activeVideoPath) syncDeepLink(activeVideoPath); }
   if (target === 'library') exploreFolder(currentBrowsingDir || '/sdcard');
+  if (target === 'tasks') refreshTasks();
 }
 window.addEventListener('hashchange', () => {
-  const t = (window.location.hash || '').replace(/^#/, '') || 'home';
+  const raw = (window.location.hash || '').replace(/^#/, '') || 'home';
+  if (raw.startsWith('player/')) { openDeepLink(raw); return; }
+  const t = raw.split('/')[0];
   if (t !== currentView) navigateTo(t); // skip the echo of our own hash update
 });
 document.querySelectorAll('.drawer-item').forEach((btn) => {
@@ -1920,20 +2253,11 @@ if (homeQuickSearch) {
 /* ------------------------------------------------------------------ */
 /* Library, dashboard, history                                         */
 /* ------------------------------------------------------------------ */
-// Seamless session restore on reload (runs once, never when the library is merely reloaded)
+// Opening the site always starts on Home. Only a deep link (#player/series/season/episode) starts an episode.
 function restoreSessionState() {
   if (sessionRestoreDone) return;
   sessionRestoreDone = true;
-  const raw = lsGet('astra_active_playback_state');
-  if (!raw) return;
-  try {
-    const s = JSON.parse(raw);
-    if (!s || !s.relPath) return;
-    currentPathTokens = s.folderTokens || [];
-
-    navigateTo('player');
-    inspectMediaAndPlay(s.title || 'Episode', s.relPath, s.time || 0);
-  } catch (e) {}
+  if (pendingDeepLink) { const d = pendingDeepLink; pendingDeepLink = null; openDeepLink(d); }
 }
 
 async function loadLibrary(refresh = false) {
@@ -1943,7 +2267,7 @@ async function loadLibrary(refresh = false) {
     fullLibrary = data.library || {};
     libraryRoot = data.root || '';
     renderDashboard();
-    renderHistory();
+    await renderHistory();
   } catch (e) {
     /* offline: keep whatever is on screen */
   }
@@ -1988,6 +2312,7 @@ function renderDashboard(query = '') {
     const card = document.createElement('div');
     card.className = 'anime-deck-card';
     card.innerHTML = `
+      <div class="deck-thumb"></div>
       <h4 class="deck-title">${escapeHtml(cleanMediaTitle(folder))}</h4>
       <span class="deck-sub">${eps.length} Episodes</span>
     `;
@@ -2000,6 +2325,7 @@ function renderDashboard(query = '') {
       navigateTo('player');
     };
     seriesCardsGrid.appendChild(card);
+    attachThumb(card.querySelector('.deck-thumb'), eps[0].relPath || eps[0].fullPath, 'series', folder);
   });
 
   if (shown === 0) {
@@ -2058,6 +2384,7 @@ async function renderHistory() {
       const card = document.createElement('div');
       card.className = 'history-deck-card';
       card.innerHTML = `
+        <div class="history-thumb"><div class="history-bar" style="width:${Math.min(100, Number(item.percent) || 0)}%"></div></div>
         <div class="history-name">${escapeHtml(cleanMediaTitle(item.name))}</div>
         <div class="history-time-tag">${formatTime(item.time)} / ${formatTime(item.dur)} (${Number(item.percent) || 0}%)</div>
         <button class="pill-btn highlight mini" style="margin-top:6px;">Resume</button>
@@ -2067,6 +2394,7 @@ async function renderHistory() {
         navigateTo('player');
       };
       historyGrid.appendChild(card);
+      attachThumb(card.querySelector('.history-thumb'), k, 'video', item.name);
     });
   } catch (e) {}
 }
@@ -2101,10 +2429,602 @@ $('resetHistoryFileBtn').onclick = clearHistory;
 $('openClearHistoryModalBtn').onclick = clearHistory;
 
 /* ------------------------------------------------------------------ */
+/* Chapters                                                            */
+/* ------------------------------------------------------------------ */
+const chapterMarks = $('chapterMarks');
+const chapterLabel = $('chapterLabel');
+const chaptersBtn = $('chaptersBtn');
+const chaptersPanel = $('chaptersPanel');
+const chaptersList = $('chaptersList');
+const skipChapterBtn = $('skipChapterBtn');
+const skipChapterText = $('skipChapterText');
+const SKIPPABLE = /^(op|ed|opening|ending|intro|recap|preview|credits|next episode)|opening|ending|\bop\b|\bed\b|recap|preview/i;
+let chapters = [];
+let chapterIdx = -1;
+let autoSkipped = new Set();
+
+function chapterAt(t) {
+  for (let i = chapters.length - 1; i >= 0; i--) if (t >= chapters[i].start - 0.05) return chapters[i];
+  return null;
+}
+function chapterTime(s) { return formatTime(s); }
+
+function renderChapterMarks() {
+  if (!chapterMarks) return;
+  chapterMarks.innerHTML = '';
+  const dur = getDuration();
+  if (!dur) return;
+  chapters.forEach((c, i) => {
+    if (i === 0 || c.start <= 0 || c.start >= dur) return;
+    const m = document.createElement('i');
+    m.style.left = `${(c.start / dur) * 100}%`;
+    chapterMarks.appendChild(m);
+  });
+}
+
+function renderChapterList() {
+  chaptersList.innerHTML = '';
+  chapters.forEach((c, i) => {
+    const row = document.createElement('div');
+    row.className = 'chapter-row';
+    row.dataset.i = i;
+    row.innerHTML = `<span class="chapter-time">${chapterTime(c.start)}</span><span class="chapter-name">${escapeHtml(c.title)}</span>`;
+    row.onclick = () => { seekToTargetSecond(c.start); chaptersPanel.classList.remove('open'); resetHideTimer(); };
+    chaptersList.appendChild(row);
+  });
+}
+
+function setChapters(list) {
+  chapters = (Array.isArray(list) ? list : []).filter((c) => Number.isFinite(c.start))
+    .map((c, i) => ({ start: c.start, end: c.end, title: c.title || `Chapter ${i + 1}` }));
+  chapterIdx = -2; // force refresh on next tick
+  autoSkipped = new Set();
+  const has = chapters.length > 0;
+  if (chaptersBtn) chaptersBtn.style.display = has ? '' : 'none';
+  if (chapterLabel) chapterLabel.textContent = '';
+  if (skipChapterBtn) skipChapterBtn.style.display = 'none';
+  if (chaptersPanel) chaptersPanel.classList.remove('open');
+  renderChapterMarks();
+  renderChapterList();
+}
+
+function onChapterTick(t) {
+  if (!chapters.length) return;
+  const cur = chapterAt(t);
+  const idx = cur ? chapters.indexOf(cur) : -1;
+  if (idx === chapterIdx) return;
+  chapterIdx = idx;
+  if (chapterLabel) chapterLabel.textContent = cur ? cur.title : '';
+  chaptersList.querySelectorAll('.chapter-row').forEach((r) => r.classList.toggle('current', Number(r.dataset.i) === idx));
+  const hasNext = idx >= 0 && idx < chapters.length - 1;
+  const skippable = cur && SKIPPABLE.test(cur.title);
+  if (skipChapterBtn) {
+    skipChapterBtn.style.display = hasNext ? '' : 'none';
+    skipChapterText.textContent = skippable ? `Skip ${cur.title.length > 18 ? cur.title.slice(0, 16) + '…' : cur.title}` : 'Next chapter';
+    skipChapterBtn.classList.toggle('highlight', !!skippable);
+  }
+  if (prefs.autoSkip && skippable && hasNext && !autoSkipped.has(idx) && cur.end - t > 2) {
+    autoSkipped.add(idx);
+    showToast(`Skipped ${cur.title}`, 1500);
+    seekToTargetSecond(cur.end + 0.05);
+  }
+}
+
+function stepChapter(dir) {
+  if (isScreenLocked || !chapters.length) return;
+  const t = absoluteTime();
+  const cur = chapterAt(t);
+  let idx = cur ? chapters.indexOf(cur) : 0;
+  if (dir < 0) idx = (t - chapters[idx].start > 3) ? idx : idx - 1;
+  else idx += 1;
+  if (idx < 0) idx = 0;
+  if (idx >= chapters.length) return;
+  seekToTargetSecond(chapters[idx].start);
+  showToast(chapters[idx].title, 1200);
+}
+function toggleChaptersPanel() {
+  if (!chapters.length || isScreenLocked) return;
+  playerEpisodesDrawer.classList.remove('open');
+  settingsModal.classList.remove('open');
+  chaptersPanel.classList.toggle('open');
+  const cur = chaptersList.querySelector('.chapter-row.current');
+  if (cur) cur.scrollIntoView({ block: 'center' });
+}
+if (chaptersBtn) chaptersBtn.onclick = (e) => { e.stopPropagation(); toggleChaptersPanel(); };
+$('chaptersClose').onclick = () => chaptersPanel.classList.remove('open');
+if (skipChapterBtn) skipChapterBtn.onclick = (e) => { e.stopPropagation(); stepChapter(1); };
+video.addEventListener('durationchange', renderChapterMarks);
+video.addEventListener('loadedmetadata', renderChapterMarks);
+
+/* ------------------------------------------------------------------ */
+/* Transcode pre-buffer / rebuffer                                     */
+/* ------------------------------------------------------------------ */
+let rebufferTimer = null;
+function bufferedAhead() {
+  const t = video.currentTime;
+  for (let i = 0; i < video.buffered.length; i++) {
+    if (video.buffered.start(i) <= t + 0.3 && video.buffered.end(i) >= t) return video.buffered.end(i) - t;
+  }
+  return 0;
+}
+function endRebuffer(resume = true) {
+  clearInterval(rebufferTimer); rebufferTimer = null;
+  if (!internalPause) return;
+  internalPause = false;
+  playerBufferingIndicator.classList.remove('show');
+  if (resume) video.play().catch(() => {});
+}
+function startRebuffer() {
+  if (internalPause) return;
+  internalPause = true;
+  const token = playToken;
+  const began = Date.now();
+  let best = 0, lastGain = Date.now();
+  video.pause();
+  playerBufferingIndicator.classList.add('show');
+  rebufferTimer = setInterval(() => {
+    if (token !== playToken || !isTranscodingMode) { endRebuffer(false); return; }
+    const dur = getDuration() || 0;
+    const remaining = dur ? Math.max(0, dur - absoluteTime()) : 999;
+    const target = Math.min(needBuf(), remaining - 1);
+    const ahead = bufferedAhead();
+    probeLoadingText.textContent = `Buffering ${Math.floor(ahead)}s / ${Math.floor(target)}s`;
+    if (ahead > best + 0.3) { best = ahead; lastGain = Date.now(); }
+    // stop waiting when the encoder is not producing anything new (slow phone), instead of staring at 0s
+    if (ahead >= target || Date.now() - began > 30000 || (Date.now() - lastGain > 8000 && Date.now() - began > 8000)) endRebuffer(true);
+  }, 400);
+}
+// A manual play/pause press during a rebuffer simply ends the wait.
+const _togglePlayPause = togglePlayPause;
+togglePlayPause = function () { if (internalPause) { endRebuffer(true); return; } _togglePlayPause(); };
+
+/* Name tips: long-press (touch) or hover (mouse) on any [data-tip] button */
+(function () {
+  let timer = null, cur = null, hideT = null, justShown = null;
+  const hide = () => { clearTimeout(hideT); if (cur) cur.classList.remove('tip-on'); cur = null; };
+  const show = (b) => { hide(); b.classList.add('tip-on'); cur = b; hideT = setTimeout(hide, 1800); };
+  document.addEventListener('pointerdown', (e) => {
+    const b = e.target.closest && e.target.closest('[data-tip]');
+    hide(); clearTimeout(timer);
+    if (!b || e.pointerType === 'mouse') return;
+    timer = setTimeout(() => { show(b); justShown = b; }, 420);
+  }, true);
+  ['pointerup', 'pointercancel', 'pointerleave', 'scroll'].forEach((ev) => document.addEventListener(ev, () => clearTimeout(timer), true));
+  document.addEventListener('click', (e) => {          // the release of a long-press must not trigger the button
+    const b = e.target.closest && e.target.closest('[data-tip]');
+    if (b && b === justShown) { e.preventDefault(); e.stopPropagation(); }
+    justShown = null;
+  }, true);
+  document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('[data-tip]')) e.preventDefault(); });
+  document.addEventListener('mouseover', (e) => {
+    const b = e.target.closest && e.target.closest('[data-tip]');
+    clearTimeout(timer);
+    if (!b) { hide(); return; }
+    if (b === cur) return;
+    timer = setTimeout(() => show(b), 450);
+  });
+})();
+
+/* Auto resolution: watch the transcoder speed, step down when it cannot keep up */
+let autoSlowHits = 0, autoLastStep = 0;
+setInterval(async () => {
+  if (prefs.quality !== 'auto' || qualityOverride || !isTranscodingMode || !isCurrentFile10Bit || video.paused || internalPause || document.hidden) { autoSlowHits = 0; return; }
+  if (autoLevel >= AUTO_LEVELS.length - 1 || Date.now() - autoLastStep < 15000) return;
+  try {
+    const st = await (await fetch('/api/transcode/stats')).json();
+    if (!st.active || !st.speed || st.age > 4000) return;
+    const starving = bufferedAhead() < 4;
+    autoSlowHits = (st.speed < 0.95 && starving) ? autoSlowHits + 1 : 0;
+    if (autoSlowHits >= 2) {
+      autoSlowHits = 0; autoLastStep = Date.now(); autoLevel++;
+      const h = { balanced: 720, fast: 480, low: 360 }[AUTO_LEVELS[autoLevel]];
+      showToast(`Decoder at ${st.speed.toFixed(2)}x \u2192 switching to ${h}p`, 3000);
+      seekToTargetSecond(absoluteTime());
+    }
+  } catch (e) {}
+}, 2500);
+
+/* ------------------------------------------------------------------ */
+/* Thumbnails (lazy, 2 at a time, cached in memory + server disk)      */
+/* ------------------------------------------------------------------ */
+const thumbCache = new Map();
+const thumbQueue = [];
+let thumbActive = 0;
+const thumbObserver = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
+  entries.forEach((en) => {
+    if (!en.isIntersecting) return;
+    thumbObserver.unobserve(en.target);
+    const job = en.target._thumbJob;
+    if (job) { thumbQueue.push(job); pumpThumbs(); }
+  });
+}, { rootMargin: '200px' }) : null;
+
+function pumpThumbs() {
+  while (thumbActive < 2 && thumbQueue.length) {
+    const job = thumbQueue.shift();
+    thumbActive++;
+    loadThumb(job).finally(() => { thumbActive--; pumpThumbs(); });
+  }
+}
+async function loadThumb(job) {
+  const { el, file, kind } = job;
+  if (!el.isConnected) return;
+  const key = `${kind}:${file}`;
+  let url = thumbCache.get(key);
+  if (!url) {
+    try {
+      const res = await fetch(`/api/thumb?file=${encodeURIComponent(file)}&kind=${kind}`);
+      if (res.status === 200) {
+        url = URL.createObjectURL(await res.blob());
+        thumbCache.set(key, url);
+      } else if (res.status === 204 && (job.tries = (job.tries || 0) + 1) <= 3) {
+        setTimeout(() => { if (el.isConnected) { thumbQueue.push(job); pumpThumbs(); } }, 20000);
+        return;
+      }
+    } catch (e) { return; }
+  }
+  if (url && el.isConnected) {
+    el.style.backgroundImage = `url("${url}")`;
+    el.classList.add('has-img');
+  }
+}
+function attachThumb(el, file, kind, label) {
+  if (!el) return;
+  el.dataset.initial = (cleanMediaTitle(label || '').trim()[0] || '▶').toUpperCase();
+  if (!prefs.thumbs || !file) return;
+  el._thumbJob = { el, file, kind };
+  if (thumbObserver) thumbObserver.observe(el);
+  else { thumbQueue.push(el._thumbJob); pumpThumbs(); }
+}
+
+/* ------------------------------------------------------------------ */
+/* Sleep timer & preferences panel                                     */
+/* ------------------------------------------------------------------ */
+function setSleep(min) {
+  clearTimeout(sleepTimerId); sleepTimerId = null; sleepAtEnd = false;
+  const txt = $('sleepText'); const sel = $('prefSleep');
+  if (min > 0) {
+    sleepTimerId = setTimeout(() => {
+      video.pause(); notifyStreamPause();
+      showToast('Sleep timer: paused', 4000);
+      if (txt) txt.textContent = 'Off'; if (sel) sel.value = '0';
+    }, min * 60000);
+    if (txt) txt.textContent = `Pauses in ${min} min`;
+  } else if (min < 0) {
+    sleepAtEnd = true;
+    if (txt) txt.textContent = 'Stops after this episode';
+  } else if (txt) txt.textContent = 'Off';
+}
+
+function applyFill() { playerWrapper.classList.toggle('fit-fill', !!prefs.fsFill); }
+function initPrefsPanel() {
+  const bind = (id, key, num) => {
+    const el = $(id); if (!el) return;
+    if (el.type === 'checkbox') { el.checked = !!prefs[key]; el.onchange = () => { prefs[key] = el.checked; savePrefs(); }; }
+    else { el.value = String(prefs[key]); el.onchange = () => { prefs[key] = num ? Number(el.value) : el.value; savePrefs(); }; }
+  };
+  bind('prefSeek', 'seekStep', true); bind('prefQuality', 'quality'); bind('prefBuffer', 'preBuffer', true);
+  bind('prefAutoSkip', 'autoSkip'); bind('prefFsRotate', 'fsRotate'); bind('prefAutoNext', 'autoNext');
+  bind('prefHw', 'hwEnc');
+  bind('prefFsFill', 'fsFill'); $('prefFsFill').addEventListener('change', applyFill); applyFill();
+  const th = $('prefThumbs');
+  if (th) { th.checked = !!prefs.thumbs; th.onchange = () => { prefs.thumbs = th.checked; savePrefs(); renderDashboard(); renderHistory(); }; }
+  $('prefSleep').onchange = (e) => setSleep(Number(e.target.value));
+  $('prefQuality').addEventListener('change', () => {
+    if (isTranscodingMode && activeVideoPath) { showToast('Applying quality...', 1500); seekToTargetSecond(absoluteTime()); }
+  });
+  $('btnClearThumbs').onclick = async () => {
+    try { await fetch('/api/thumbs/clear', { method: 'POST' }); } catch (e) {}
+    thumbCache.forEach((u) => URL.revokeObjectURL(u)); thumbCache.clear();
+    showToast('Thumbnail cache cleared', 2000); renderDashboard(); renderHistory();
+  };
+  fetch('/api/system/capabilities').then((r) => r.json()).then((c) => {
+    $('prefHwText').textContent = prefs.hwEnc === 'auto' && c.hwEncoder
+      ? `HEVC → H.264: hardware encoder (${c.hwEncoder}) first, software fallback`
+      : 'HEVC → H.264: software x264 (v1.3 engine)';
+  }).catch(() => {});
+}
+initPrefsPanel();
+
+/* ------------------------------------------------------------------ */
+/* AI subtitles (whisper.cpp on the server, fully offline)             */
+/* ------------------------------------------------------------------ */
+const aiUi = {
+  box: $('aiBox'), state: $('aiState'), bar: $('aiBar'), prog: $('aiProgress'), hint: $('aiHint'), chip: $('aiChip'),
+  gen: $('aiGenBtn'), all: $('aiGenAllBtn'), cancel: $('aiCancelBtn'), lang: $('aiLang'), tr: $('aiTranslate'), files: $('aiFiles')
+};
+let aiMode = 'quick';
+let aiVad = true;
+const AI_MODE_TEXT = {
+  quick: 'Quick: smallest model, only the speech is read. Fast, but it can mishear or miss words.',
+  ai: 'AI: a better model. Slower, but much more accurate. Best for dialogue you really want to follow.'
+};
+function setAiMode(m, save) {
+  aiMode = m === 'ai' ? 'ai' : 'quick';
+  document.querySelectorAll('[data-aimode]').forEach((b) => b.classList.toggle('active', b.dataset.aimode === aiMode));
+  if (aiUi.hint) aiUi.hint.textContent = AI_MODE_TEXT[aiMode] + (aiVad ? '' : ' Install the speech-detection model for a big speed-up (README).');
+  if (save && activeVideoPath) { aiRowKey = null; aiCheck(activeVideoPath, false); }
+  if (save) saveCurrentSettings();
+}
+document.querySelectorAll('[data-aimode]').forEach((b) => { b.onclick = () => setAiMode(b.dataset.aimode, true); });
+let aiAvailable = false;
+let aiPoll = null;
+let aiActiveKey = null;
+let aiRowKey = null;
+let aiLastCues = -1;
+
+function aiQuery(file) {
+  return `file=${encodeURIComponent(file)}&audioTrack=${encodeURIComponent(activeAudioStreamIndex)}`
+    + `&lang=${aiUi.lang.value}&translate=${aiUi.tr.checked ? 1 : 0}&mode=${aiMode}`;
+}
+const aiMeta = document.createElement('div'); aiMeta.className = 'ai-meta';
+const aiLive = document.createElement('div'); aiLive.className = 'ai-live';
+const aiErr = document.createElement('div'); aiErr.className = 'ai-err';
+aiUi.prog.after(aiMeta, aiLive, aiErr);
+const fmtDur = (sec) => { sec = Math.max(0, Math.round(sec)); const m = Math.floor(sec / 60), r = sec % 60; return m ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`; };
+function aiShow(info) {
+  const active = info && ['queued', 'extracting', 'transcribing'].includes(info.state);
+  aiUi.prog.classList.toggle('on', !!active || (info && info.state === 'done'));
+  aiUi.bar.style.width = `${info ? info.pct || 0 : 0}%`;
+  aiUi.cancel.style.display = active ? '' : 'none';
+  aiUi.gen.disabled = !aiAvailable || !!active;
+  aiUi.all.disabled = !aiAvailable;
+  let txt = '';
+  if (info) {
+    if (info.state === 'queued') txt = `Waiting${info.queued ? ` (${info.queued} in queue)` : ''}`;
+    else if (info.state === 'transcribing') txt = `${info.pct}%`;
+    else if (info.state === 'done') txt = 'Ready';
+    else if (info.state === 'error') txt = 'Failed';
+    else if (info.state === 'cancelled') txt = 'Cancelled';
+  }
+  aiUi.state.textContent = txt;
+  aiMeta.textContent = '';
+  if (info && info.state === 'transcribing') {
+    const left = info.eta != null ? ` · ~${fmtDur(info.eta)} left` : '';
+    aiMeta.innerHTML = `<span>${info.mode === 'quick' ? 'Quick' : 'AI'} \u00b7 part ${info.chunk} of ${info.chunks}${left}</span><span>${fmtDur(info.elapsed)} elapsed${info.queued ? ` · ${info.queued} queued` : ''}</span>`;
+  }
+  aiLive.textContent = info && info.state === 'transcribing' && info.last ? `\u201c${info.last}\u201d` : '';
+  aiErr.textContent = info && info.state === 'error' ? (info.msg || 'Subtitle generation failed') : '';
+  aiUi.chip.style.display = active ? '' : 'none';
+  if (active) aiUi.chip.textContent = `Subs ${Math.round(info.pct)}%`;
+  aiUi.files.textContent = '';
+  if (info && info.state === 'done' && info.key) {
+    const nm = document.createElement('div'); nm.className = 'ai-file-name'; nm.textContent = info.name || 'Subtitles';
+    const row = document.createElement('div'); row.className = 'ai-file-links';
+    ['srt', 'vtt'].forEach((f) => { const a = document.createElement('a'); a.href = `/api/ai/subs/download?key=${info.key}&fmt=${f}`; a.textContent = f.toUpperCase(); a.setAttribute('download', ''); row.appendChild(a); });
+    aiUi.files.append(nm, row);
+  }
+}
+function aiAddRow(key, meta) {
+  const have = subTrackList.querySelector('[data-ai-key]');
+  if (aiRowKey === key && have) return have;
+  subTrackList.querySelectorAll('[data-ai-key]').forEach((r) => r.remove());
+  const row = document.createElement('div');
+  row.className = 'opt-row';
+  row.dataset.aiKey = key;
+  row.textContent = meta ? `${meta.mode === 'quick' ? 'Quick' : 'AI'} \u00b7 ${meta.lang === 'auto' ? 'auto-detect' : meta.lang}${meta.translate ? ' \u2192 English' : ''}` : (aiMode === 'quick' ? 'Quick subtitles' : 'AI subtitles');
+  row.onclick = () => { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${key}`); vpSet(activeVideoPath, { sub: 'ai' }); };
+  subTrackList.appendChild(row);
+  aiRowKey = key;
+  return row;
+}
+async function aiCheck(file, autoUse) {
+  try {
+    const info = await (await fetch(`/api/ai/subs?${aiQuery(file)}&from=${Math.floor(absoluteTime() || 0)}`)).json();
+    if (info.error) return null;
+    aiShow(info);
+    if (info.state === 'done') {
+      const row = aiAddRow(info.key);
+      if (autoUse && row) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); }
+    }
+    return info;
+  } catch (e) { return null; }
+}
+function aiStartPolling(file) {
+  clearInterval(aiPoll);
+  const forPath = file;
+  aiPoll = setInterval(async () => {
+    if (forPath !== activeVideoPath) { clearInterval(aiPoll); return; }
+    const info = await aiCheck(forPath, false);
+    if (!info) return;
+    if (info.state === 'transcribing' && info.partial && info.cues !== aiLastCues) {      // live: show what is done so far
+      aiLastCues = info.cues;
+      const row = aiAddRow(info.key);
+      const sel = subTrackList.querySelector('.opt-row.selected');
+      if (row && (sel === row || !sel || sel.textContent.trim() === 'Off')) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); }
+    }
+    if (info.state === 'done') {
+      clearInterval(aiPoll);
+      showToast('Subtitles generated', 3000);
+      const row = aiAddRow(info.key);
+      if (row) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); vpSet(activeVideoPath, { sub: 'ai' }); }
+    } else if (['error', 'cancelled', 'none'].includes(info.state)) {
+      clearInterval(aiPoll);
+      if (info.state === 'error') showToast(info.msg || 'Subtitle generation failed', 5000);
+    }
+  }, 1500);
+}
+async function aiGenerate(file, priority) {
+  const res = await fetch('/api/ai/subs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, mode: aiMode, priority: !!priority, from: priority ? Math.floor(absoluteTime() || 0) : 0 })
+  });
+  return res.json();
+}
+aiUi.gen.onclick = async () => {
+  if (!activeVideoPath) return;
+  const info = await aiGenerate(activeVideoPath, true);
+  if (info.error) { showToast(info.error, 5000); return; }
+  aiShow(info);
+  if (info.state === 'done') { aiCheck(activeVideoPath, true); return; }
+  aiStartPolling(activeVideoPath);
+};
+aiUi.all.onclick = async () => {
+  if (!activeVideoPath) return;
+  let n = 0;
+  for (const it of currentVideoList) {
+    const f = it.relPath || it.fullPath;
+    if (!f) continue;
+    const info = await aiGenerate(f, f === activeVideoPath);
+    if (info && !info.error && info.state !== 'done') n++;
+  }
+  showToast(n ? `Queued ${n} episode${n > 1 ? 's' : ''} — they run one at a time` : 'All episodes already have subtitles', 3500);
+  aiCheck(activeVideoPath, false).then((i) => { if (i && ['queued', 'extracting', 'transcribing'].includes(i.state)) aiStartPolling(activeVideoPath); });
+};
+aiUi.cancel.onclick = async () => {
+  const info = await aiCheck(activeVideoPath, false);
+  if (info && info.key) await fetch('/api/ai/subs/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: info.key }) });
+  clearInterval(aiPoll);
+  aiCheck(activeVideoPath, false);
+};
+[aiUi.lang, aiUi.tr].forEach((el) => el.addEventListener('change', () => { if (activeVideoPath) aiCheck(activeVideoPath, false); }));
+async function aiLoadExisting(path) {
+  try {
+    const d = await (await fetch(`/api/ai/subs/for?file=${encodeURIComponent(path)}`)).json();
+    if (path !== activeVideoPath) return;
+    const items = d.items || [];
+    const done = items.filter((i) => i.state === 'done');
+    const best = done.find((i) => i.mode !== 'quick') || done[0];
+    if (best) {
+      const row = aiAddRow(best.key, best);
+      const vp = vpGet(path);
+      const sel = subTrackList.querySelector('.opt-row.selected');
+      const nothing = !sel || sel.textContent.trim() === 'Off';
+      if (row && (vp.sub === 'ai' || (vp.sub === undefined && nothing))) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${best.key}`); }
+      if ([...aiUi.lang.options].some((o) => o.value === best.lang)) aiUi.lang.value = best.lang;
+      aiUi.tr.checked = !!best.translate;
+      setAiMode(best.mode === 'quick' ? 'quick' : 'ai', false);
+      aiShow({ state: 'done', pct: 100, key: best.key, name: best.name });
+    }
+  } catch (e) {}
+}
+function aiOnEpisodeLoaded() {
+  aiRowKey = null; aiLastCues = -1;
+  aiShow(null);
+  if (activeVideoPath) {
+    const vp = vpGet(activeVideoPath);
+    setSubDelay(vp.delay || 0);
+    if (vp.sub && vp.sub.startsWith('f:')) {                       // external subtitle file chosen earlier
+      const full = vp.sub.slice(2);
+      addExternalSubtitle(full.split('/').pop(), full);
+    }
+  }
+  if (!aiAvailable && !activeVideoPath) return;
+  if (activeVideoPath) {
+    aiLoadExisting(activeVideoPath).then(() => {
+      if (!aiAvailable || !activeVideoPath) return;
+      aiCheck(activeVideoPath, false).then((info) => {
+        if (info && ['queued', 'extracting', 'transcribing'].includes(info.state)) aiStartPolling(activeVideoPath);
+      });
+    });
+  }
+}
+fetch('/api/ai/capabilities').then((r) => r.json()).then((c) => {
+  aiAvailable = !!c.available;
+  aiUi.gen.disabled = aiUi.all.disabled = !aiAvailable;
+  aiVad = !!c.vad;
+  setAiMode(aiMode, false);
+  if (!aiAvailable) aiUi.hint.textContent = 'Needs whisper.cpp and a model on the device \u2014 see README "AI subtitles".';
+}).catch(() => {});
+
+/* ------------------------------------------------------------------ */
+/* Task manager                                                        */
+/* ------------------------------------------------------------------ */
+const tasksList = $('tasksList');
+let tasksData = [];
+const fmtMin = (sec) => { sec = Math.max(0, Math.round(sec || 0)); const m = Math.floor(sec / 60), r = sec % 60; return m ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`; };
+function openByPath(relPath) {
+  const key = Object.keys(fullLibrary).find((k) => fullLibrary[k].some((e) => (e.relPath || e.fullPath) === relPath));
+  if (!key) { showToast('Episode not found in the library', 2500); return; }
+  const ep = fullLibrary[key].find((e) => (e.relPath || e.fullPath) === relPath);
+  currentPathTokens = key === 'Anime Root' ? [] : key.split(' / ');
+  currentVideoList = fullLibrary[key];
+  const h = historyCache[relPath];
+  navigateTo('player');
+  inspectMediaAndPlay(ep.name, relPath, h ? resumeStartTime(h) : 0);
+}
+function taskCard(t) {
+  const live = t.canStop;
+  const card = document.createElement('div');
+  card.className = `task-card ${t.state}`;
+  const pct = t.pct == null ? null : Math.max(0, Math.min(100, t.pct));
+  const stateTxt = { queued: 'Waiting', transcribing: 'Running', extracting: 'Running', running: 'Running', paused: 'Paused', done: 'Finished', error: 'Failed', cancelled: 'Stopped' }[t.state] || t.state;
+  card.innerHTML = `
+    <div class="task-top">
+      <span class="task-kind">${escapeHtml(t.label)}</span>
+      <span class="task-state ${t.state}">${stateTxt}${pct != null && live ? ` \u00b7 ${Math.round(pct)}%` : ''}</span>
+    </div>
+    <div class="task-title"></div>
+    <div class="task-bar ${pct == null && live ? 'indeterminate' : ''}"><i style="width:${pct == null ? (live ? 40 : 0) : pct}%"></i></div>
+    <div class="task-detail"></div>
+    <div class="task-live"></div>
+    <div class="task-btns"></div>`;
+  card.querySelector('.task-title').textContent = cleanMediaTitle(t.title || t.file || '');
+  card.querySelector('.task-detail').textContent = [t.detail, t.meta, t.elapsed ? `${fmtMin(t.elapsed)} elapsed` : ''].filter(Boolean).join('  \u00b7  ');
+  const liveEl = card.querySelector('.task-live');
+  if (t.state === 'error' && t.msg) { liveEl.textContent = t.msg; liveEl.classList.add('err'); }
+  else if (t.last && live) liveEl.textContent = `\u201c${t.last}\u201d`;
+  const btns = card.querySelector('.task-btns');
+  const mk = (txt, cls, fn) => { const b = document.createElement('button'); b.className = `pill-btn ${cls || ''}`; b.textContent = txt; b.onclick = fn; btns.appendChild(b); };
+  if (live) mk('Stop', 'danger', async () => { await fetch('/api/tasks/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: t.id }) }); refreshTasks(); });
+  if (t.type === 'ai' && t.file) {
+    mk('Open episode', '', () => openByPath(t.file));
+    if (t.state === 'error' || t.state === 'cancelled') mk('Retry', 'highlight', async () => {
+      await fetch('/api/ai/subs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: t.file, ...t.opts, priority: true }) });
+      refreshTasks();
+    });
+  }
+  return card;
+}
+function renderTasks() {
+  const live = tasksData.filter((t) => t.canStop), rest = tasksData.filter((t) => !t.canStop);
+  $('tasksSummary').textContent = live.length ? `${live.length} running or waiting` : (rest.length ? 'Nothing running' : 'No tasks yet');
+  $('btnTasksStopAll').disabled = !live.length;
+  $('btnTasksClear').disabled = !rest.length;
+  tasksList.textContent = '';
+  if (!tasksData.length) {
+    const e = document.createElement('div'); e.className = 'empty-hint';
+    e.textContent = 'Subtitle generation, live video conversion and thumbnail jobs appear here.';
+    tasksList.appendChild(e); return;
+  }
+  [...live, ...rest].forEach((t) => tasksList.appendChild(taskCard(t)));
+}
+function updateTaskBadge(n) {
+  const b = $('taskBadge'); if (!b) return;
+  b.textContent = n; b.style.display = n ? '' : 'none';
+}
+async function refreshTasks() {
+  try {
+    const d = await (await fetch('/api/tasks')).json();
+    tasksData = d.tasks || [];
+    updateTaskBadge(d.activeCount || 0);
+    if (currentView === 'tasks') renderTasks();
+  } catch (e) {}
+}
+$('btnTasksStopAll').onclick = async () => {
+  if (!window.confirm('Stop all running tasks?')) return;
+  await fetch('/api/tasks/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'all' }) });
+  refreshTasks();
+};
+$('btnTasksClear').onclick = async () => { await fetch('/api/tasks/clear', { method: 'POST' }); refreshTasks(); };
+setInterval(() => { if (!document.hidden) refreshTasks(); }, 2000);   // light JSON call; also keeps the drawer badge current
+refreshTasks();
+
+/* Every control in the settings panel is saved (debounced) so nothing is lost on reload */
+{
+  let t = null;
+  const queue = () => { clearTimeout(t); t = setTimeout(saveCurrentSettings, 300); };
+  ['input', 'change', 'click'].forEach((ev) => $('settingsModal').addEventListener(ev, queue, true));
+  window.addEventListener('pagehide', saveCurrentSettings);
+}
+
+/* ------------------------------------------------------------------ */
 /* Boot                                                                */
 /* ------------------------------------------------------------------ */
 loadSavedSettings();
-loadLibrary(true);
-if (!lsGet('astra_active_playback_state')) {
-  navigateTo(window.location.hash || 'home');
+{
+  const boot = (window.location.hash || '').replace(/^#/, '');
+  if (boot.startsWith('player/')) { pendingDeepLink = boot; navigateTo(boot); }
+  else navigateTo(boot && boot !== 'player' ? boot : 'home');
 }
+loadLibrary(true);
