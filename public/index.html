@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Astra Player</title>
-  <link rel="stylesheet" href="style.css?v=200">
+  <link rel="stylesheet" href="style.css?v=240">
   <script>window.open = function() { return null; };</script>
 </head>
 <body>
@@ -291,7 +291,7 @@
                 <option value="ko">Korean</option><option value="zh">Chinese</option><option value="es">Spanish</option><option value="fr">French</option>
                 <option value="de">German</option><option value="ru">Russian</option><option value="ar">Arabic</option>
               </select>
-              <label class="switch-row"><input type="checkbox" id="aiTranslate"><i class="switch"></i><span>To English</span></label>
+              <label class="switch-row"><input type="checkbox" id="aiTranslate"><i class="tgl"></i><span>To English</span></label>
             </div>
             <div class="ai-progress" id="aiProgress"><i id="aiBar"></i></div>
             <div class="ai-row">
@@ -443,8 +443,8 @@
         <select class="pref-select" id="prefSeek"><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option></select></div>
       <div class="setting-item"><div><h5>Default resolution</h5><p id="prefHwText">Used for HEVC / 10-bit / compat mode</p></div>
         <select class="pref-select" id="prefQuality"><option value="auto">Auto (adapts to speed)</option><option value="low">Low (360p)</option><option value="fast">Fast (480p)</option><option value="balanced">Balanced (720p)</option><option value="quality">Quality (720p+)</option></select></div>
-      <div class="setting-item"><div><h5>Hardware encoder</h5><p>Off = software x264 (the v1.3 engine, most reliable). Auto tries the phone's H.264 encoder first</p></div>
-        <select class="pref-select" id="prefHw"><option value="auto">Auto</option><option value="off">Off (software)</option></select></div>
+      <div class="setting-item"><div><h5>Hardware encoder</h5><p>Software = x264 (the v1.3 engine, most reliable). Auto tries the phone's H.264 encoder first</p></div>
+        <select class="pref-select" id="prefHw"><option value="auto">Auto</option><option value="off">Software</option></select></div>
       <div class="setting-item"><div><h5>Pre-buffer (transcode)</h5><p>Wait to build a lead before playing</p></div>
         <select class="pref-select" id="prefBuffer"><option value="0">Off</option><option value="5">5 s</option><option value="10">10 s</option><option value="20">20 s</option><option value="40">40 s</option></select></div>
       <div class="setting-item"><div><h5>Auto-skip opening / ending</h5><p>Uses chapter names when available</p></div><label class="switch"><input type="checkbox" id="prefAutoSkip"><span></span></label></div>
@@ -502,6 +502,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=200"></script>
+  <script src="script.js?v=240"></script>
 </body>
 </html>

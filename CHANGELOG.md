@@ -1,0 +1,22 @@
+# Changelog
+
+## v1.15.1
+- Automatic mode switching: a frozen picture (sound keeps playing) restarts the stream, or moves direct play to the compatibility transcoder.
+- Sticky mode: an episode that once needed the transcoder stays on it (saved per episode, shared between devices).
+- The 8-bit / 10-bit readout shows what the file really is.
+
+## v1.15.0
+- AI subtitles: voice-focused audio (centre channel on 5.1/7.1, band-pass + denoise in AI mode) and silence removal before transcription, with times mapped back to the real timeline (`"whisper": {"gate": false}` turns it off).
+- Sync fix: the server clock decides, so a device with a wrong clock can no longer revert settings (pre-buffer etc.); changes made right before a reload are kept.
+- Precise sliders: − / + buttons on every settings slider.
+
+## v1.14.0
+- Multi-device support: preferences, saved filters, subtitle look/delay and per-episode choices are kept on the server (`profile.json`) and shared by every device that opens the address.
+
+## v1.13.x
+- AI subtitles: repeat-loop cleanup, 3 s overlap at chunk edges, damaged-AAC retries, language detection, no translate on English audio, full audio window in AI mode.
+- Elapsed timer stops when a task finishes; Quick and AI subtitles both stay in the subtitle list.
+- Fixed doubled toggle knobs and truncated dropdowns in settings.
+
+## v1.12
+- ASS positioned subtitles (karaoke), readable subtitle names with SRT/VTT export, Quick vs AI modes, wake lock.

@@ -11,3 +11,4 @@ cache/
 history.json.tmp
 models/
 *.zip
+profile.json

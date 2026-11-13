@@ -1,5 +1,53 @@
 'use strict';
 
+/* ---- v1.14 multi-device sync: settings are kept on the server and shared by every device ---- */
+const SYNC_KEYS = ['astra_prefs', 'astra_saved_filters', 'astra_video_prefs', 'astra_user_settings'];
+const syncStamps = (() => { try { return JSON.parse(localStorage.getItem('astra_sync_t') || '{}') || {}; } catch (e) { return {}; } })();
+const rawSet = Storage.prototype.setItem;
+function syncStampSave() { try { rawSet.call(localStorage, 'astra_sync_t', JSON.stringify(syncStamps)); } catch (e) {} }
+let syncPending = {}, syncTimer = null, syncApplying = false;
+const syncDirty = (() => { try { return JSON.parse(localStorage.getItem('astra_sync_d') || '{}') || {}; } catch (e) { return {}; } })();   // changed here, not yet confirmed by the server
+function syncDirtySave() { try { rawSet.call(localStorage, 'astra_sync_d', JSON.stringify(syncDirty)); } catch (e) {} }
+function syncPush() {
+  syncTimer = null;
+  const changes = syncPending; syncPending = {};
+  if (!Object.keys(changes).length) return;
+  fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }), keepalive: true })
+    .then((r) => r.json()).then((d) => { Object.keys(changes).forEach((k) => { if (d.keys && d.keys[k] && d.keys[k].v === changes[k].v) syncStamps[k] = d.keys[k].t; delete syncDirty[k]; }); syncStampSave(); syncDirtySave(); })
+    .catch(() => {
+    Object.keys(changes).forEach((k) => { if (!syncPending[k]) syncPending[k] = changes[k]; });       // retry with the next change
+  });
+}
+Storage.prototype.setItem = function (k, v) {
+  rawSet.call(this, k, v);
+  if (this === localStorage && !syncApplying && SYNC_KEYS.includes(k)) {
+    syncPending[k] = { v: String(v) }; syncDirty[k] = 1; syncDirtySave();
+    clearTimeout(syncTimer); syncTimer = setTimeout(syncPush, 600);
+  }
+};
+// Adopt whatever is newer on the server; send up whatever this device has that is newer. Returns true if local data changed.
+function syncMerge(keys) {
+  let changed = false; const up = {};
+  syncApplying = true;
+  SYNC_KEYS.forEach((k) => {
+    const sv = keys[k], lt = syncStamps[k] || 0, lv = localStorage.getItem(k);
+    if (sv && sv.t > lt && !syncDirty[k]) { if (lv !== sv.v) { rawSet.call(localStorage, k, sv.v); changed = true; } syncStamps[k] = sv.t; }
+    else if (lv !== null && (!sv || sv.v !== lv)) up[k] = { v: lv };
+    else if (sv && sv.v === lv) delete syncDirty[k];
+  });
+  syncApplying = false; syncStampSave();
+  if (Object.keys(up).length) fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes: up }) })
+    .then((r) => r.json()).then((d) => { Object.keys(up).forEach((k) => { if (d.keys && d.keys[k]) syncStamps[k] = d.keys[k].t; delete syncDirty[k]; }); syncStampSave(); syncDirtySave(); }).catch(() => {});
+  return changed;
+}
+window.addEventListener('pagehide', () => { if (Object.keys(syncPending).length) syncPush(); });
+(function syncStart() {                       // blocking on purpose: settings must be in place before the page reads them
+  try {
+    const x = new XMLHttpRequest(); x.open('GET', '/api/profile', false); x.send();
+    if (x.status === 200) syncMerge(JSON.parse(x.responseText).keys || {});
+  } catch (e) {}
+})();
+
 const $ = (id) => document.getElementById(id);
 
 const video = $('videoElement');
@@ -82,7 +130,8 @@ let currentParentDir = '';
 let activeAudioStreamIndex = '0:a:0';
 let isTranscodingMode = false;
 let transcodeBaseOffset = 0;
-let isCurrentFile10Bit = false;
+let isCurrentFile10Bit = false;   // true = the transcoder must re-encode the picture (real 10-bit, or compatibility mode)
+let sourceIs10Bit = false;        // what the FILE really is (used for the 8-bit/10-bit readout)
 let compatMode = false;
 let nativeFallbackTried = false;
 let preferredDefaultLang = 'auto';
@@ -392,7 +441,13 @@ function triggerAutoPause() {
     }
   }
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) triggerAutoPause(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { triggerAutoPause(); return; }
+  fetch('/api/profile', { cache: 'no-store' }).then((r) => r.json()).then((d) => {          // pick up changes made on another device
+    if (!syncMerge(d.keys || {})) return;
+    try { Object.assign(prefs, JSON.parse(localStorage.getItem('astra_prefs') || '{}')); initPrefsPanel(); loadSavedSettings(); renderSavedFilters(); showToast('Settings updated from another device', 2500); } catch (e) {}
+  }).catch(() => {});
+});
 window.addEventListener('blur', triggerAutoPause);
 window.addEventListener('pagehide', triggerAutoPause);
 
@@ -718,7 +773,7 @@ function buildSubtitleList(tracks, relPath) {
 
     // Keep the subtitle language chosen on the previous episode.
     if (forcedTrack !== null) { if (String(s.streamIndex) === forcedTrack) autoChoose = choose; }
-    else if (vp.sub !== 'off' && vp.sub !== 'ai' && !autoChoose && preferredSubLang && s.lang === preferredSubLang) autoChoose = choose;
+    else if (vp.sub !== 'off' && !(vp.sub || '').startsWith('ai') && !autoChoose && preferredSubLang && s.lang === preferredSubLang) autoChoose = choose;
   });
 
   if (autoChoose) autoChoose(true);
@@ -1105,7 +1160,7 @@ function updateQualityReadout() {
   if (!qv || !qt) return;
   const h = video.videoHeight;
   qv.textContent = h > 0 ? `${h}p` : (playerResBadge.textContent || 'Auto');
-  const ten = !!isCurrentFile10Bit;
+  const ten = !!sourceIs10Bit;
   let label;
   if (isTranscodingMode) label = ten ? '10-bit \u00b7 Decoding' : (compatMode ? '8-bit \u00b7 Compat' : '8-bit \u00b7 Transcode');
   else label = ten ? '10-bit \u00b7 Native' : '8-bit \u00b7 Direct';
@@ -1253,6 +1308,8 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   nativeFallbackTried = false;
   compatMode = false;
   isCurrentFile10Bit = false;
+  sourceIs10Bit = false;
+  frameStuck = 0;
   isTranscodingMode = false;
   currentExplicitDuration = 0;
   activeAudioStreamIndex = '0:a:0';
@@ -1299,6 +1356,9 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
     currentExplicitDuration = Number(meta.duration) || 0;
     playerDurationBadge.textContent = formatTime(currentExplicitDuration);
     isCurrentFile10Bit = !!meta.is10BitHevc;
+    sourceIs10Bit = isCurrentFile10Bit;
+    // sticky mode: if this episode once needed the transcoder, it starts there every time (no flipping back to direct)
+    if (!isCurrentFile10Bit && vpGet(relPath).tc) { compatMode = true; isCurrentFile10Bit = true; }
     setChapters(meta.chapters || []);
 
     audioTrackList.innerHTML = '';
@@ -1420,6 +1480,7 @@ function fallbackToTranscode(msg) {
   nativeFallbackTried = true;
   compatMode = true;
   isCurrentFile10Bit = true; // forces full video transcode to H.264
+  try { vpSet(activeVideoPath, { tc: 1 }); } catch (e) {}      // remember: stay on the transcoder for this episode
   showToast(msg, 4000);
   startTranscodeAt(video.currentTime || 0);
   return true;
@@ -1437,6 +1498,26 @@ function armPictureWatch() {
     if (video.videoWidth === 0 || frames === 0) fallbackToTranscode('No picture from this video — switching to compatibility transcode');
   }, 3500);
 }
+
+/* v1.15 automatic mode switching: a frozen picture (sound keeps going) restarts the stream, or moves direct play to the transcoder.
+   Once an episode has needed the transcoder it stays there (sticky, saved per episode). */
+let frameStuck = 0, frameLast = -1, timeLast = -1, fixTimes = [];
+setInterval(() => {
+  try {
+    if (!activeVideoPath || video.paused || video.seeking || video.ended || document.hidden || internalPause || video.readyState < 3 || !video.getVideoPlaybackQuality) { frameStuck = 0; frameLast = -1; return; }
+    const f = video.getVideoPlaybackQuality().totalVideoFrames, t = video.currentTime;
+    if (frameLast >= 0 && f === frameLast && t - timeLast > 0.6) frameStuck++; else frameStuck = 0;
+    frameLast = f; timeLast = t;
+    if (frameStuck < 3) return;
+    frameStuck = 0; frameLast = -1;
+    if (!isTranscodingMode) { fallbackToTranscode('Picture froze — switching to compatibility mode'); return; }
+    const now = Date.now(); fixTimes = fixTimes.filter((x) => now - x < 120000);
+    if (fixTimes.length >= 3) return;                                   // do not loop forever
+    fixTimes.push(now);
+    showToast('Picture froze — restarting the stream', 2500);
+    startTranscodeAt(absoluteTime(), 'Fixing frozen picture...');
+  } catch (e) {}
+}, 1000);
 video.addEventListener('error', () => {
   if (!activeVideoPath || !video.getAttribute('src')) return;
   playerBufferingIndicator.classList.remove('show');
@@ -2795,15 +2876,15 @@ function aiShow(info) {
     aiUi.files.append(nm, row);
   }
 }
+function aiRowLabel(meta) { return `${meta.mode === 'quick' ? 'Quick' : 'AI'} \u00b7 ${meta.lang === 'auto' ? 'auto-detect' : meta.lang}${meta.translate ? ' \u2192 English' : ''}`; }
 function aiAddRow(key, meta) {
-  const have = subTrackList.querySelector('[data-ai-key]');
-  if (aiRowKey === key && have) return have;
-  subTrackList.querySelectorAll('[data-ai-key]').forEach((r) => r.remove());
+  const have = [...subTrackList.querySelectorAll('[data-ai-key]')].find((r) => r.dataset.aiKey === key);
+  if (have) { if (meta) have.textContent = aiRowLabel(meta); aiRowKey = key; return have; }      // every generated subtitle stays in the list
   const row = document.createElement('div');
   row.className = 'opt-row';
   row.dataset.aiKey = key;
-  row.textContent = meta ? `${meta.mode === 'quick' ? 'Quick' : 'AI'} \u00b7 ${meta.lang === 'auto' ? 'auto-detect' : meta.lang}${meta.translate ? ' \u2192 English' : ''}` : (aiMode === 'quick' ? 'Quick subtitles' : 'AI subtitles');
-  row.onclick = () => { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${key}`); vpSet(activeVideoPath, { sub: 'ai' }); };
+  row.textContent = meta ? aiRowLabel(meta) : (aiMode === 'quick' ? 'Quick subtitles' : 'AI subtitles');
+  row.onclick = () => { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${key}`); vpSet(activeVideoPath, { sub: 'ai:' + key }); };
   subTrackList.appendChild(row);
   aiRowKey = key;
   return row;
@@ -2837,7 +2918,7 @@ function aiStartPolling(file) {
       clearInterval(aiPoll);
       showToast('Subtitles generated', 3000);
       const row = aiAddRow(info.key);
-      if (row) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); vpSet(activeVideoPath, { sub: 'ai' }); }
+      if (row) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${info.key}`); vpSet(activeVideoPath, { sub: 'ai:' + info.key }); }
     } else if (['error', 'cancelled', 'none'].includes(info.state)) {
       clearInterval(aiPoll);
       if (info.state === 'error') showToast(info.msg || 'Subtitle generation failed', 5000);
@@ -2886,11 +2967,14 @@ async function aiLoadExisting(path) {
     const done = items.filter((i) => i.state === 'done');
     const best = done.find((i) => i.mode !== 'quick') || done[0];
     if (best) {
-      const row = aiAddRow(best.key, best);
+      const rows = new Map();
+      done.slice().sort((a, b) => (a.mode === 'quick') - (b.mode === 'quick')).forEach((i) => rows.set(i.key, aiAddRow(i.key, i)));      // AI first, then Quick: all stay selectable
       const vp = vpGet(path);
       const sel = subTrackList.querySelector('.opt-row.selected');
       const nothing = !sel || sel.textContent.trim() === 'Off';
-      if (row && (vp.sub === 'ai' || (vp.sub === undefined && nothing))) { selectOptRow(subTrackList, row); selectSubtitleUrl(`/api/ai/subs/vtt?key=${best.key}`); }
+      const wantKey = vp.sub && vp.sub.startsWith('ai:') ? vp.sub.slice(3) : null;
+      const pick = wantKey && rows.get(wantKey) ? done.find((i) => i.key === wantKey) : best;
+      if (rows.get(pick.key) && (vp.sub === 'ai' || wantKey || (vp.sub === undefined && nothing))) { selectOptRow(subTrackList, rows.get(pick.key)); selectSubtitleUrl(`/api/ai/subs/vtt?key=${pick.key}`); }
       if ([...aiUi.lang.options].some((o) => o.value === best.lang)) aiUi.lang.value = best.lang;
       aiUi.tr.checked = !!best.translate;
       setAiMode(best.mode === 'quick' ? 'quick' : 'ai', false);
@@ -3028,3 +3112,31 @@ loadSavedSettings();
   else navigateTo(boot && boot !== 'player' ? boot : 'home');
 }
 loadLibrary(true);
+
+/* ------------------------------------------------------------------ */
+/* v1.15 precise sliders: - / + buttons (hold to repeat) around every settings slider */
+(function fineSliders() {
+  document.querySelectorAll('input.custom-range').forEach((rng) => {
+    if (rng.parentElement.classList.contains('rng-wrap')) return;
+    const wrap = document.createElement('div'); wrap.className = 'rng-wrap';
+    rng.parentNode.insertBefore(wrap, rng);
+    const mk = (txt, dir, label) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'rng-btn'; b.textContent = txt; b.setAttribute('aria-label', label);
+      const step = () => {
+        const st = parseFloat(rng.step) || 1, mn = parseFloat(rng.min), mx = parseFloat(rng.max);
+        const dec = (String(st).split('.')[1] || '').length;
+        let v = Math.min(mx, Math.max(mn, parseFloat(rng.value) + dir * st));
+        rng.value = v.toFixed(dec);
+        rng.dispatchEvent(new Event('input', { bubbles: true })); rng.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      let t1 = null, t2 = null;
+      const stop = () => { clearTimeout(t1); clearInterval(t2); };
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); step(); t1 = setTimeout(() => { t2 = setInterval(step, 70); }, 450); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => b.addEventListener(ev, stop));
+      return b;
+    };
+    wrap.appendChild(mk('−', -1, 'Decrease'));
+    wrap.appendChild(rng);
+    wrap.appendChild(mk('+', 1, 'Increase'));
+  });
+})();

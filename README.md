@@ -121,6 +121,20 @@ File names are cleaned so you can tell episodes apart. Examples:
 
 Recognised: `S01E22`, `S01 E22`, `1x05`, `Episode 3`, `Ep 3`, `E045` and a trailing ` - 07`. Bracketed groups and tags (`[720p]`, `[Eng Dub]`, `[Multi-Audio]`) are removed from the title.
 
+## Several devices (v1.14)
+
+Open the same address (for example `http://<phone-ip>:3000`) from any phone, tablet or PC and they all share one profile, kept on the server in `profile.json`:
+
+- player preferences (seek step, resolution, pre-buffer, auto-skip, fullscreen options...),
+- saved named filters, subtitle look and delay, the subtitle chosen per episode,
+- watch progress and history (already server-side in `history.json`).
+
+Storage is server-side too: the media folder, thumbnails and every generated subtitle live on the machine running Astra, so all devices see the same library and the same subtitles.
+
+How it works: each setting change is sent to the server after about half a second; when a device opens (or comes back to the tab) it takes whatever is newer. The most recent change wins per setting, and a toast tells you when settings arrived from another device. Device-only things (the exact playback position of the open tab) are not synced. There is no login: anyone who can reach the address shares the profile, so keep it on your own network or behind a tunnel you trust. Delete `profile.json` to reset all devices.
+
+**Sliders:** every settings slider has − / + buttons (hold to repeat) for exact values.
+
 ## Links, saved settings and tasks
 
 ### Episode links
@@ -156,6 +170,11 @@ Browsers on phones usually cannot play 10-bit HEVC, so the server decodes it and
 - **Lowest level (360p)** also skips the HEVC loop filter for a cheaper decode.
 - Measured on a 2-core test machine with a synthetic 20 Mbps 10-bit 720p clip: 1.8x realtime at 720p, 2.2x at 480p, 2.5x at 360p. A phone will be slower; Auto exists for that.
 
+### Automatic mode switching (v1.15.1)
+- If the picture freezes while the sound keeps playing, Astra restarts the stream by itself (up to 3 times in 2 minutes). If it freezes in direct play, it moves to the compatibility transcoder.
+- **Sticky mode:** once an episode has needed the transcoder it stays on it, saved per episode (and shared between devices), so it does not drop back to direct play and flip between 8-bit and 10-bit.
+- The 8-bit / 10-bit readout now shows what the file really is, not what the transcoder does.
+
 ## Subtitles
 
 ### Styled and positioned subtitles (ASS/SSA)
@@ -183,7 +202,15 @@ How it works:
 - The box shows the real progress (parts done, time left, time elapsed, the last sentence heard). Errors are shown in red with the cause (for example Android killed whisper because of low memory).
 - **Voice detection (big speed-up):** if a Silero VAD model is installed, whisper only decodes real speech and skips music and silence. Install it once: `cd ~/whisper.cpp && sh ./models/download-vad-model.sh silero-v5.1.2` (file `ggml-silero-v5.1.2.bin` in `~/whisper.cpp/models`, found automatically; or set `"whisper": {"vad": "/path/file.bin"}`).
 - **Two workers:** on phones with 6 or more cores two whisper processes work on different parts at the same time (set `"whisper": {"parallel": 1}` to turn it off, or `"threads": N` for threads per worker).
-- Speed settings used: greedy decoding (`-bs 1 -bo 1`), no temperature fallback (`-nf`), shorter audio context (`-ac 768`), no previous-text context (`-mc 0`). If your whisper build rejects them the server retries with plain settings by itself.
+- Speed settings used: greedy decoding (`-bs 1 -bo 1`), no previous-text context (`-mc 0`), shorter audio context (`-ac 768` quick / `1024` AI). Temperature fallback stays **on** (it is what breaks repeat loops). If your whisper build rejects a flag the server retries with simpler settings by itself.
+
+**Accuracy fixes (v1.13):**
+- *Repeat loops* ("you, you, you...", "No." 40 times, "a film of a film of..."): quiet/music parts no longer trap the tiny model, because suppression flags (`-et -lpt -nth -sns`) and a tuned voice detector are used, and every line is cleaned afterwards: stutters and repeated phrases are collapsed, duplicate and overlapping lines are merged, and a short line can no longer stay on screen for 40 seconds.
+- *Missing scenes at part edges:* each part is read 3 s early and 3 s late, and a part keeps the lines that *start* inside it, so a sentence is never cut at a boundary. If a long part comes back almost empty, it is checked again without voice detection.
+- *Damaged audio* (`Terminating thread with return code ...`): extraction retries by skipping corrupt AAC frames, then with a slow exact seek. If a slice still cannot be decoded it is skipped with a note in the log instead of stopping the whole episode.
+- **Voice-focused audio (v1.15):** on 5.1/7.1 files the dialogue (centre) channel is used; AI mode also band-passes and denoises the speech range. Real stem separation (Demucs-style) needs far more RAM/CPU than a phone has, so this is a lightweight version of the same idea.
+- **Silence removed before listening (v1.15):** each part is scanned for silence, the silent stretches are cut out, whisper hears only speech, and every line's time is mapped back to the real timeline. Set `"whisper": {"gate": false}` in `config.json` to turn it off.
+- Old v1.12 results are not reused (they are regenerated with the fixes). Opening/ending chapters are skipped by design, so a gap of about 90 s near the start is normal.
 
 Speed on a weak phone: transcription speed depends on the CPU. `ggml-tiny.bin` is used first because it is about twice as fast as base. For a faster file you can use a quantised model (for example `ggml-tiny-q5_1.bin`) if you have one. To prefer `ggml-base.bin` set `"whisper": {"model": "/full/path/ggml-base.bin", "threads": 4}` in `config.json`. Use **All episodes** and let it run while charging for a whole season.
 
