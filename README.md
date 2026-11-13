@@ -121,6 +121,18 @@ File names are cleaned so you can tell episodes apart. Examples:
 
 Recognised: `S01E22`, `S01 E22`, `1x05`, `Episode 3`, `Ep 3`, `E045` and a trailing ` - 07`. Bracketed groups and tags (`[720p]`, `[Eng Dub]`, `[Multi-Audio]`) are removed from the title.
 
+## Several devices (v1.14)
+
+Open the same address (for example `http://<phone-ip>:3000`) from any phone, tablet or PC and they all share one profile, kept on the server in `profile.json`:
+
+- player preferences (seek step, resolution, pre-buffer, auto-skip, fullscreen options...),
+- saved named filters, subtitle look and delay, the subtitle chosen per episode,
+- watch progress and history (already server-side in `history.json`).
+
+Storage is server-side too: the media folder, thumbnails and every generated subtitle live on the machine running Astra, so all devices see the same library and the same subtitles.
+
+How it works: each setting change is sent to the server after about half a second; when a device opens (or comes back to the tab) it takes whatever is newer. The most recent change wins per setting, and a toast tells you when settings arrived from another device. Device-only things (the exact playback position of the open tab) are not synced. There is no login: anyone who can reach the address shares the profile, so keep it on your own network or behind a tunnel you trust. Delete `profile.json` to reset all devices.
+
 ## Links, saved settings and tasks
 
 ### Episode links

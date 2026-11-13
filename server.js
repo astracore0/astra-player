@@ -1701,6 +1701,37 @@ function persistHistory() {
   });
 }
 
+
+/* ---- v1.14 multi-device profile: settings live on the server, every phone/PC that opens this address shares them ---- */
+const PROFILE_FILE = path.join(__dirname, 'profile.json');
+const PROFILE_KEYS = new Set(['astra_prefs', 'astra_saved_filters', 'astra_video_prefs', 'astra_user_settings']);
+let profileData = {};                          // key -> { v: "<json string>", t: ms }
+try { profileData = JSON.parse(fs.readFileSync(PROFILE_FILE, 'utf-8')) || {}; } catch (e) { profileData = {}; }
+let profileTimer = null;
+function profileSave() {
+  clearTimeout(profileTimer);
+  profileTimer = setTimeout(() => {
+    const tmp = PROFILE_FILE + '.tmp';
+    fs.writeFile(tmp, JSON.stringify(profileData), 'utf-8', (err) => {
+      if (err) return log('ERROR', `Profile save failed (${err.message})`);
+      fs.rename(tmp, PROFILE_FILE, (e2) => { if (e2) log('ERROR', `Profile save failed (${e2.message})`); });
+    });
+  }, 300);
+}
+app.get('/api/profile', (req, res) => { res.set('Cache-Control', 'no-store'); res.json({ keys: profileData, now: Date.now() }); });
+app.post('/api/profile', (req, res) => {
+  const ch = (req.body && req.body.changes) || {};
+  let n = 0;
+  Object.keys(ch).forEach((k) => {
+    const c = ch[k];
+    if (!PROFILE_KEYS.has(k) || !c || typeof c.v !== 'string' || c.v.length > 512 * 1024) return;
+    const t = Number(c.t) || Date.now();
+    if (!profileData[k] || t >= profileData[k].t) { profileData[k] = { v: c.v, t }; n++; }
+  });
+  if (n) profileSave();
+  res.json({ ok: true, updated: n, keys: profileData });
+});
+
 app.get('/api/history', (req, res) => {
   res.json(historyData);
 });

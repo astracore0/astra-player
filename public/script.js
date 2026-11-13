@@ -1,5 +1,47 @@
 'use strict';
 
+/* ---- v1.14 multi-device sync: settings are kept on the server and shared by every device ---- */
+const SYNC_KEYS = ['astra_prefs', 'astra_saved_filters', 'astra_video_prefs', 'astra_user_settings'];
+const syncStamps = (() => { try { return JSON.parse(localStorage.getItem('astra_sync_t') || '{}') || {}; } catch (e) { return {}; } })();
+const rawSet = Storage.prototype.setItem;
+function syncStampSave() { try { rawSet.call(localStorage, 'astra_sync_t', JSON.stringify(syncStamps)); } catch (e) {} }
+let syncPending = {}, syncTimer = null, syncApplying = false;
+function syncPush() {
+  syncTimer = null;
+  const changes = syncPending; syncPending = {};
+  if (!Object.keys(changes).length) return;
+  fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }), keepalive: true }).catch(() => {
+    Object.keys(changes).forEach((k) => { if (!syncPending[k]) syncPending[k] = changes[k]; });       // retry with the next change
+  });
+}
+Storage.prototype.setItem = function (k, v) {
+  rawSet.call(this, k, v);
+  if (this === localStorage && !syncApplying && SYNC_KEYS.includes(k)) {
+    const t = Date.now(); syncStamps[k] = t; syncStampSave();
+    syncPending[k] = { v: String(v), t };
+    clearTimeout(syncTimer); syncTimer = setTimeout(syncPush, 600);
+  }
+};
+// Adopt whatever is newer on the server; send up whatever this device has that is newer. Returns true if local data changed.
+function syncMerge(keys) {
+  let changed = false; const up = {};
+  syncApplying = true;
+  SYNC_KEYS.forEach((k) => {
+    const sv = keys[k], lt = syncStamps[k] || 0, lv = localStorage.getItem(k);
+    if (sv && sv.t > lt) { if (lv !== sv.v) { rawSet.call(localStorage, k, sv.v); changed = true; } syncStamps[k] = sv.t; }
+    else if (lv !== null && (!sv || lt > sv.t)) up[k] = { v: lv, t: lt || Date.now() };
+  });
+  syncApplying = false; syncStampSave();
+  if (Object.keys(up).length) fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes: up }) }).catch(() => {});
+  return changed;
+}
+(function syncStart() {                       // blocking on purpose: settings must be in place before the page reads them
+  try {
+    const x = new XMLHttpRequest(); x.open('GET', '/api/profile', false); x.send();
+    if (x.status === 200) syncMerge(JSON.parse(x.responseText).keys || {});
+  } catch (e) {}
+})();
+
 const $ = (id) => document.getElementById(id);
 
 const video = $('videoElement');
@@ -392,7 +434,13 @@ function triggerAutoPause() {
     }
   }
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) triggerAutoPause(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { triggerAutoPause(); return; }
+  fetch('/api/profile', { cache: 'no-store' }).then((r) => r.json()).then((d) => {          // pick up changes made on another device
+    if (!syncMerge(d.keys || {})) return;
+    try { Object.assign(prefs, JSON.parse(localStorage.getItem('astra_prefs') || '{}')); initPrefsPanel(); loadSavedSettings(); renderSavedFilters(); showToast('Settings updated from another device', 2500); } catch (e) {}
+  }).catch(() => {});
+});
 window.addEventListener('blur', triggerAutoPause);
 window.addEventListener('pagehide', triggerAutoPause);
 
