@@ -1,13 +1,12 @@
 {
   "name": "astra-player",
-  "version": "1.15.1",
-  "description": "Local storage anime streaming web player",
+  "version": "1.15.3",
+  "description": "Lightweight offline-first media server and web player",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "license": "MIT",
   "dependencies": {
-    "express": "^4.22.3"
+    "express": "^4.21.2"
   }
 }

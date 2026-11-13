@@ -1375,7 +1375,7 @@ async function aiRun(job) {
         const down = job.centre ? 'pan=mono|c0=0.85*FC+0.15*FL+0.15*FR' : 'pan=mono|c0=0.5*c0+0.5*c1';
         const chain = [];
         if (mode === 0 && (job.centre || channels >= 2)) chain.push(down);
-        if (mode === 0 && job.mode !== 'quick') chain.push('highpass=f=90', 'lowpass=f=7600', 'afftdn=nf=-30');
+        if (mode === 0 && job.mode !== 'quick') chain.push('highpass=f=180', 'lowpass=f=3800', 'dynaudnorm=f=150:g=15');
         else if (mode === 0) chain.push('highpass=f=80');
         chain.push('aresample=async=1:first_pts=0');
         a.push('-vn', '-af', chain.join(','), '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav);
@@ -1413,7 +1413,7 @@ async function aiRun(job) {
         }
         const toAbs = (cs) => cs.map((c) => (gate ? { s: gate.map(c.s, 's') + ss, e: Math.max(gate.map(c.s, 's'), gate.map(c.e, 'e')) + ss, text: c.text } : { s: c.s + ss, e: c.e + ss, text: c.text }));
         // tier 0 = fast flags + tuned VAD, 1 = fast flags + basic VAD, 2 = fast flags, 3 = plain
-        const run = (threads, tier) => {
+        const run = (threads, tier) => { tier = gate ? Math.max(tier, 2) : tier;
           const args = ['-m', modelPath, '-f', wavIn, '-t', String(threads), '-l', job.langUsed || job.lang, '-ovtt', '-of', prefix];
           if (tier <= 2) args.push('-bs', '1', '-bo', '1', '-mc', '0',
             ...(quick ? ['-ac', '768'] : []),                    // AI mode keeps the full audio window: shortened windows shift timestamps   // temperature fallback stays ON: it is what breaks decoding loops
@@ -2037,13 +2037,18 @@ process.on('exit', killTranscode);
 process.on('uncaughtException', (e) => log('ERROR', `Uncaught exception: ${e && e.stack ? e.stack : e}`));
 process.on('unhandledRejection', (e) => log('ERROR', `Unhandled rejection: ${e && e.stack ? e.stack : e}`));
 
-const server = app.listen(PORT, HOST, () => {
-  log('SYSTEM', `Astra Pro Engine listening on ${PORT}`);
-  log('STORAGE', `Root target set to: ${MEDIA_ROOT}`);
-});
-server.on('error', (e) => {
-  log('ERROR', e.code === 'EADDRINUSE'
-    ? `Port ${PORT} is already in use. Stop the other instance or start with PORT=<number>.`
-    : `Server error: ${e.message}`);
-  process.exit(1);
-});
+function startServer(port, attemptsLeft = 50) {
+  const srv = app.listen(port, HOST, () => {
+    log('SYSTEM', `Astra Pro Engine listening on ${port}`);
+    log('STORAGE', `Root target set to: ${MEDIA_ROOT}`);
+  });
+  srv.on('error', (e) => {
+    if (e.code === 'EADDRINUSE' && attemptsLeft > 0) {
+      log('SYSTEM', `Port ${port} busy, trying ${port + 1}...`);
+      return startServer(port + 1, attemptsLeft - 1);
+    }
+    log('ERROR', `Server error: ${e.message}`);
+    process.exit(1);
+  });
+}
+startServer(PORT);

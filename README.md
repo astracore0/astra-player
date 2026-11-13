@@ -33,6 +33,23 @@ Astra Player is a lightweight, offline-first media server and web player designe
 
 ---
 
+## One-command setup (setup.sh)
+
+Works on Termux (Android), Debian/Ubuntu, Fedora, Arch, Alpine, openSUSE, macOS (Homebrew), WSL and GitHub Codespaces.
+
+```
+bash setup.sh                 # Node.js, ffmpeg, git, app dependencies, media folder
+bash setup.sh --whisper       # also build whisper.cpp + tiny/base models + voice-detection model
+bash setup.sh --media /path   # choose the media folder
+bash setup.sh --dry-run       # only show what would happen
+bash start.sh                 # start Astra (written by setup.sh)
+```
+
+- **Termux:** run `termux-setup-storage` first (setup.sh does it if needed), then `bash setup.sh`. The start script holds the Termux wake lock.
+- **Codespaces:** run `bash setup.sh`, start with `bash start.sh`, then forward port 3000 in the Ports tab.
+- **Windows:** use WSL (`wsl --install`), then run the script inside Ubuntu.
+- Options: `--port N`, `--model tiny|base|small` (AI model to download). Safe to run again.
+
 ## Prerequisites
 
 Node.js, Git and ffmpeg (ffmpeg/ffprobe are needed for subtitles, audio-track switching and transcoding):
