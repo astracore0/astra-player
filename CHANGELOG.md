@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.16.1 (self-audit fixes)
+- Timing snap no longer pulls a line onto the neighbouring speech stretch's edge.
+- Loop cleanup is gentler on real dialogue ("No, no, no!" and a line said twice stay) and stronger on loops: a whole block of lines repeated straight after itself is dropped; wrong-script junk (Hangul/CJK/\ufffd) is removed from English/Latin-language subtitles.
+- Language detection output is no longer cut off; an export name is only treated as taken if that file still exists.
+- setup.sh applies the armv7 patch only if the whisper.cpp build fails, then rebuilds.
+
 ## v1.16.0
 - Subtitle timing: lines that open/close next to a real speech edge are snapped onto it (`"whisper": {"snap": false}` turns it off).
 - Unique subtitle names: another language/model/translation of the same episode gets its own file name instead of replacing the old one.

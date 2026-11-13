@@ -992,7 +992,7 @@ function aiExport(job, vtt) {
   try {
     fs.mkdirSync(AI_EXPORT_DIR, { recursive: true });
     // never overwrite a different subtitle of the same episode: another language / model / translation gets its own name
-    const taken = (n) => Object.keys(aiIndex).some((k) => k !== job.key && aiIndex[k] && aiIndex[k].name === n);
+    const taken = (n) => Object.keys(aiIndex).some((k) => k !== job.key && aiIndex[k] && aiIndex[k].name === n) && fs.existsSync(path.join(AI_EXPORT_DIR, `${n}.srt`));
     let name = base;
     if (taken(name)) {
       const tag = job.translate ? 'translated' : (job.langUsed || (job.lang && job.lang !== 'auto' ? job.lang : '') || 'auto');
@@ -1140,7 +1140,7 @@ function collapseRepeats(text) {
       if (!base.trim()) continue;
       let reps = 1;
       while (i + (reps + 1) * n <= w.length && w.slice(i + reps * n, i + (reps + 1) * n).map(normTok).join(' ') === base) reps++;
-      if (reps >= (n >= 3 ? 2 : 3)) w.splice(i + n, (reps - 1) * n);                                       // "still still still" / "a film of a film of ..." -> once
+      if (reps >= (n === 1 ? 5 : 3)) w.splice(i + n, (reps - 1) * n);      // 'No, no, no!' stays; 'you, you, you, ...' and phrase loops go                                       // "still still still" / "a film of a film of ..." -> once
     }
   }
   return w.join(' ').replace(/\s+([,.!?])/g, '$1').trim();
@@ -1165,14 +1165,14 @@ function cleanCues(cues) {
     const s = c.s, maxOf = (t) => Math.min(8, 1.8 + t.length * 0.09);   // a 20-character line is not on screen for 40 s
     const e = Math.min(Math.max(c.e, s + 0.4), s + maxOf(text));
     const words = nt.split(' ').length;
-    // same (or near-same) line as one of the last three: a decoding loop or a chunk-edge duplicate -> keep one
-    let dup = null;
+    // a decoding loop / chunk-edge duplicate: touching or overlapping repeat of the same line, or the 3rd+ identical line within 10 s
+    let dup = null, same = 0;
     for (let k = out.length - 1; k >= 0 && k >= out.length - 3 && !dup; k--) {
       const q = out[k], gap = s - (q.raw || q.e);
       if (gap > 10) break;
       const qn = normTxt(q.text);
-      if (qn === nt && (text.length >= 12 || gap < 1.5)) dup = q;
-      else if (text.length >= 12 && words >= 3 && gap < 6 && similar(q.text, text)) dup = q;
+      if (qn === nt) { same++; if (gap < 1.5 || same >= 2) dup = q; }
+      else if (text.length >= 12 && words >= 3 && gap < 0.5 && similar(q.text, text)) dup = q;
     }
     if (dup) {
       if (nt.length > normTxt(dup.text).length && s < dup.e + 0.5) dup.text = text;
@@ -1184,6 +1184,14 @@ function cleanCues(cues) {
     if (p && s < p.e) p.e = Math.max(p.s + 0.3, s);                    // never overlap the previous line
     out.push({ s, e, text, raw: c.e });
   });
+  // a whole run of lines repeated straight after itself (A B C D A B C D) is a loop too: keep the first copy
+  for (let m = 8; m >= 2; m--) {
+    for (let i = m; i + m <= out.length; ) {
+      let same = true;
+      for (let k = 0; k < m && same; k++) same = normTxt(out[i - m + k].text) === normTxt(out[i + k].text);
+      if (same) out.splice(i, m); else i++;
+    }
+  }
   return out.map((c) => ({ s: c.s, e: c.e, text: c.text }));
 }
 
@@ -1249,13 +1257,13 @@ function buildGated(wavFile, outFile, segs, total) {
    so a line that opens/closes next to a speech edge is moved onto that edge. */
 function snapToSpeech(cues, segs, ss) {
   const EDGE = 0.2, TOL = 1.5, out = cues.map((c) => ({ ...c }));
-  segs.forEach(([a0, b0]) => {
-    const a = a0 + ss + EDGE, b = b0 + ss - EDGE;
-    if (b - a < 0.3) return;
+  const inner = segs.map(([a0, b0]) => [a0 + ss + EDGE, b0 + ss - EDGE]).filter(([a, b]) => b - a >= 0.3);
+  const inside = (t, k) => inner.some(([a, b], j) => j !== k && t > a + 0.15 && t < b - 0.15);      // t lies in the middle of ANOTHER speech stretch
+  inner.forEach(([a, b], k) => {
     let first = null, last = null;
     out.forEach((c) => {
-      if (c.s >= a - TOL && c.s <= b && (!first || c.s < first.s)) first = c;
-      if (c.e >= a && c.e <= b + TOL && (!last || c.e > last.e)) last = c;
+      if (c.s >= a - TOL && c.s <= b && !inside(c.s, k) && (!first || c.s < first.s)) first = c;
+      if (c.e >= a && c.e <= b + TOL && !inside(c.e, k) && (!last || c.e > last.e)) last = c;
     });
     if (first && Math.abs(first.s - a) <= TOL) first.s = Math.max(0, a);
     if (last && Math.abs(last.e - b) <= TOL && b - last.s >= 0.4) last.e = b;
@@ -1296,7 +1304,7 @@ function aiSpawnWait(job, cmd, args, tailRef) {
     const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     job.proc = p; (job.procs = job.procs || new Set()).add(p); p.on('close', () => job.procs.delete(p));
     try { os.setPriority(p.pid, 0); } catch (e) {}
-    const grab = (c) => { tailRef.t = (tailRef.t + c.toString()).slice(-600); };
+    const grab = (c) => { tailRef.t = (tailRef.t + c.toString()).slice(-(tailRef.max || 600)); };
     p.stdout.on('data', grab); p.stderr.on('data', grab);
     p.on('error', (e) => resolve({ code: -1, signal: null, err: e.message }));
     p.on('close', (code, signal) => resolve({ code, signal }));
@@ -1328,7 +1336,7 @@ async function aiRun(job) {
       const ex = await aiSpawnWait(job, 'ffmpeg', ['-v', 'error', '-nostdin', '-y', '-ss', String(Math.floor(job.duration * 0.3)), '-i', job.path, '-map', job.audioTrack, '-t', '30', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', lw], { t: '' });
       if (ex.code === 0) {
         const tail = { t: '' };
-        await aiSpawnWait(job, bin, ['-m', modelPath, '-f', lw, '-dl', '-t', '2'], tail);
+        tail.max = 6000; await aiSpawnWait(job, bin, ['-m', modelPath, '-f', lw, '-dl', '-t', '2'], tail);
         const m = /auto-detected language:\s*([a-z]{2,3})/i.exec(tail.t);
         if (m) job.langUsed = m[1].toLowerCase();
       }
@@ -1486,6 +1494,9 @@ async function aiRun(job) {
         }
         cues = res.cues.filter((c) => c.s >= start - 0.01 && (i === list.length - 1 || c.s < start + len));    // each chunk owns the cues that START inside it
         cues = cleanCues(cues);
+        if (job.translate || ['en', 'es', 'fr', 'de', 'it', 'pt', 'id'].includes(job.langUsed)) {             // wrong-script junk ("\ufffd", Hangul in English audio)
+          cues = cues.map((c) => ({ ...c, text: c.text.replace(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\ufffd]+/g, '').replace(/\s{2,}/g, ' ').trim() })).filter((c) => /[\p{L}\p{N}]/u.test(c.text));
+        }
         if (gate && !(savedConfig.whisper && savedConfig.whisper.snap === false)) cues = snapToSpeech(cues, gate.segs, ss);
       }
       try { fs.unlinkSync(wav); } catch (e) {}

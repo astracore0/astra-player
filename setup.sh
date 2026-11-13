@@ -167,16 +167,21 @@ if [ "$WHISPER" = 1 ]; then
   [ -d "$W" ] || run git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$W"
   if [ "$DRY" != 1 ] && [ -d "$W" ]; then
     cd "$W" || die "cannot enter $W"
-    # 32-bit ARM (armv7) build fix
-    if [ "$(uname -m)" = "armv7l" ] || [ "$(uname -m)" = "armv8l" ]; then
-      sed -i '/inline static int32x4_t vcvtnq_s32_f32/,/^}/d' ggml/src/ggml-cpu/ggml-cpu-impl.h 2>/dev/null && ok "applied armv7 patch"
-    fi
     JOBS=2; [ "$(nproc 2>/dev/null || echo 2)" -ge 6 ] && JOBS=4
     sh ./models/download-ggml-model.sh tiny || warn "tiny model download failed"
     [ "$WHISPER_MODEL" != "tiny" ] && { sh ./models/download-ggml-model.sh "$WHISPER_MODEL" || warn "$WHISPER_MODEL model download failed"; }
     sh ./models/download-vad-model.sh silero-v5.1.2 2>/dev/null || warn "VAD model download failed (optional)"
-    cmake -B build >/dev/null && cmake --build build -j"$JOBS" --target whisper-cli --config Release \
-      && ok "whisper-cli built: $W/build/bin/whisper-cli" || warn "whisper.cpp build failed - Astra still works, only AI subtitles are off"
+    build_whisper() { cmake -B build >/dev/null && cmake --build build -j"$JOBS" --target whisper-cli --config Release; }
+    if ! build_whisper; then
+      # 32-bit ARM (armv7): known duplicate-definition error; patch the header and build again
+      if [ "$(uname -m)" = "armv7l" ] || [ "$(uname -m)" = "armv8l" ]; then
+        warn "build failed on 32-bit ARM, applying the vcvtnq patch and retrying"
+        sed -i '/inline static int32x4_t vcvtnq_s32_f32/,/^}/d' ggml/src/ggml-cpu/ggml-cpu-impl.h 2>/dev/null
+        build_whisper
+      fi
+    fi
+    if [ -x "$W/build/bin/whisper-cli" ]; then ok "whisper-cli built: $W/build/bin/whisper-cli"
+    else warn "whisper.cpp build failed - Astra still works, only AI subtitles are off"; fi
     cd "$DIR" || true
   fi
 else
