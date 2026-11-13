@@ -830,3 +830,9 @@ body.fake-fs-on { overflow: hidden; }
 .ai-file-links a:active { transform: scale(0.97); }
 .ai-row .pref-select { flex: 1; min-width: 0; background: var(--pn-bg2, #020305); color: var(--pn-text, #a9b4c8); border: 1px solid var(--pn-line, rgba(110, 140, 190, 0.2)); }
 .ai-meta:empty, .ai-live:empty, .ai-err:empty { display: none; }
+
+/* v1.15 precise sliders */
+.rng-wrap { display: flex; align-items: center; gap: 8px; width: 100%; }
+.rng-wrap .custom-range { flex: 1 1 auto; min-width: 0; }
+.rng-btn { flex: none; width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--pn-line, rgba(110,140,190,.25)); background: var(--pn-card, #141a25); color: #dbe4f5; font-size: 1.1rem; line-height: 1; cursor: pointer; touch-action: manipulation; user-select: none; }
+.rng-btn:active { background: var(--accent); color: #fff; }

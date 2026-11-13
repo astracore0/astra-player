@@ -6,19 +6,22 @@ const syncStamps = (() => { try { return JSON.parse(localStorage.getItem('astra_
 const rawSet = Storage.prototype.setItem;
 function syncStampSave() { try { rawSet.call(localStorage, 'astra_sync_t', JSON.stringify(syncStamps)); } catch (e) {} }
 let syncPending = {}, syncTimer = null, syncApplying = false;
+const syncDirty = (() => { try { return JSON.parse(localStorage.getItem('astra_sync_d') || '{}') || {}; } catch (e) { return {}; } })();   // changed here, not yet confirmed by the server
+function syncDirtySave() { try { rawSet.call(localStorage, 'astra_sync_d', JSON.stringify(syncDirty)); } catch (e) {} }
 function syncPush() {
   syncTimer = null;
   const changes = syncPending; syncPending = {};
   if (!Object.keys(changes).length) return;
-  fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }), keepalive: true }).catch(() => {
+  fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }), keepalive: true })
+    .then((r) => r.json()).then((d) => { Object.keys(changes).forEach((k) => { if (d.keys && d.keys[k] && d.keys[k].v === changes[k].v) syncStamps[k] = d.keys[k].t; delete syncDirty[k]; }); syncStampSave(); syncDirtySave(); })
+    .catch(() => {
     Object.keys(changes).forEach((k) => { if (!syncPending[k]) syncPending[k] = changes[k]; });       // retry with the next change
   });
 }
 Storage.prototype.setItem = function (k, v) {
   rawSet.call(this, k, v);
   if (this === localStorage && !syncApplying && SYNC_KEYS.includes(k)) {
-    const t = Date.now(); syncStamps[k] = t; syncStampSave();
-    syncPending[k] = { v: String(v), t };
+    syncPending[k] = { v: String(v) }; syncDirty[k] = 1; syncDirtySave();
     clearTimeout(syncTimer); syncTimer = setTimeout(syncPush, 600);
   }
 };
@@ -28,13 +31,16 @@ function syncMerge(keys) {
   syncApplying = true;
   SYNC_KEYS.forEach((k) => {
     const sv = keys[k], lt = syncStamps[k] || 0, lv = localStorage.getItem(k);
-    if (sv && sv.t > lt) { if (lv !== sv.v) { rawSet.call(localStorage, k, sv.v); changed = true; } syncStamps[k] = sv.t; }
-    else if (lv !== null && (!sv || lt > sv.t)) up[k] = { v: lv, t: lt || Date.now() };
+    if (sv && sv.t > lt && !syncDirty[k]) { if (lv !== sv.v) { rawSet.call(localStorage, k, sv.v); changed = true; } syncStamps[k] = sv.t; }
+    else if (lv !== null && (!sv || sv.v !== lv)) up[k] = { v: lv };
+    else if (sv && sv.v === lv) delete syncDirty[k];
   });
   syncApplying = false; syncStampSave();
-  if (Object.keys(up).length) fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes: up }) }).catch(() => {});
+  if (Object.keys(up).length) fetch('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes: up }) })
+    .then((r) => r.json()).then((d) => { Object.keys(up).forEach((k) => { if (d.keys && d.keys[k]) syncStamps[k] = d.keys[k].t; delete syncDirty[k]; }); syncStampSave(); syncDirtySave(); }).catch(() => {});
   return changed;
 }
+window.addEventListener('pagehide', () => { if (Object.keys(syncPending).length) syncPush(); });
 (function syncStart() {                       // blocking on purpose: settings must be in place before the page reads them
   try {
     const x = new XMLHttpRequest(); x.open('GET', '/api/profile', false); x.send();
@@ -3079,3 +3085,31 @@ loadSavedSettings();
   else navigateTo(boot && boot !== 'player' ? boot : 'home');
 }
 loadLibrary(true);
+
+/* ------------------------------------------------------------------ */
+/* v1.15 precise sliders: - / + buttons (hold to repeat) around every settings slider */
+(function fineSliders() {
+  document.querySelectorAll('input.custom-range').forEach((rng) => {
+    if (rng.parentElement.classList.contains('rng-wrap')) return;
+    const wrap = document.createElement('div'); wrap.className = 'rng-wrap';
+    rng.parentNode.insertBefore(wrap, rng);
+    const mk = (txt, dir, label) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'rng-btn'; b.textContent = txt; b.setAttribute('aria-label', label);
+      const step = () => {
+        const st = parseFloat(rng.step) || 1, mn = parseFloat(rng.min), mx = parseFloat(rng.max);
+        const dec = (String(st).split('.')[1] || '').length;
+        let v = Math.min(mx, Math.max(mn, parseFloat(rng.value) + dir * st));
+        rng.value = v.toFixed(dec);
+        rng.dispatchEvent(new Event('input', { bubbles: true })); rng.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      let t1 = null, t2 = null;
+      const stop = () => { clearTimeout(t1); clearInterval(t2); };
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); step(); t1 = setTimeout(() => { t2 = setInterval(step, 70); }, 450); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => b.addEventListener(ev, stop));
+      return b;
+    };
+    wrap.appendChild(mk('−', -1, 'Decrease'));
+    wrap.appendChild(rng);
+    wrap.appendChild(mk('+', 1, 'Increase'));
+  });
+})();

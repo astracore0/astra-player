@@ -133,6 +133,8 @@ Storage is server-side too: the media folder, thumbnails and every generated sub
 
 How it works: each setting change is sent to the server after about half a second; when a device opens (or comes back to the tab) it takes whatever is newer. The most recent change wins per setting, and a toast tells you when settings arrived from another device. Device-only things (the exact playback position of the open tab) are not synced. There is no login: anyone who can reach the address shares the profile, so keep it on your own network or behind a tunnel you trust. Delete `profile.json` to reset all devices.
 
+**Sliders:** every settings slider has − / + buttons (hold to repeat) for exact values.
+
 ## Links, saved settings and tasks
 
 ### Episode links
@@ -201,6 +203,8 @@ How it works:
 - *Repeat loops* ("you, you, you...", "No." 40 times, "a film of a film of..."): quiet/music parts no longer trap the tiny model, because suppression flags (`-et -lpt -nth -sns`) and a tuned voice detector are used, and every line is cleaned afterwards: stutters and repeated phrases are collapsed, duplicate and overlapping lines are merged, and a short line can no longer stay on screen for 40 seconds.
 - *Missing scenes at part edges:* each part is read 3 s early and 3 s late, and a part keeps the lines that *start* inside it, so a sentence is never cut at a boundary. If a long part comes back almost empty, it is checked again without voice detection.
 - *Damaged audio* (`Terminating thread with return code ...`): extraction retries by skipping corrupt AAC frames, then with a slow exact seek. If a slice still cannot be decoded it is skipped with a note in the log instead of stopping the whole episode.
+- **Voice-focused audio (v1.15):** on 5.1/7.1 files the dialogue (centre) channel is used; AI mode also band-passes and denoises the speech range. Real stem separation (Demucs-style) needs far more RAM/CPU than a phone has, so this is a lightweight version of the same idea.
+- **Silence removed before listening (v1.15):** each part is scanned for silence, the silent stretches are cut out, whisper hears only speech, and every line's time is mapped back to the real timeline. Set `"whisper": {"gate": false}` in `config.json` to turn it off.
 - Old v1.12 results are not reused (they are regenerated with the fixes). Opening/ending chapters are skipped by design, so a gap of about 90 s near the start is normal.
 
 Speed on a weak phone: transcription speed depends on the CPU. `ggml-tiny.bin` is used first because it is about twice as fast as base. For a faster file you can use a quantised model (for example `ggml-tiny-q5_1.bin`) if you have one. To prefer `ggml-base.bin` set `"whisper": {"model": "/full/path/ggml-base.bin", "threads": 4}` in `config.json`. Use **All episodes** and let it run while charging for a whole season.
