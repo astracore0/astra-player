@@ -170,6 +170,11 @@ Browsers on phones usually cannot play 10-bit HEVC, so the server decodes it and
 - **Lowest level (360p)** also skips the HEVC loop filter for a cheaper decode.
 - Measured on a 2-core test machine with a synthetic 20 Mbps 10-bit 720p clip: 1.8x realtime at 720p, 2.2x at 480p, 2.5x at 360p. A phone will be slower; Auto exists for that.
 
+### Automatic mode switching (v1.15.1)
+- If the picture freezes while the sound keeps playing, Astra restarts the stream by itself (up to 3 times in 2 minutes). If it freezes in direct play, it moves to the compatibility transcoder.
+- **Sticky mode:** once an episode has needed the transcoder it stays on it, saved per episode (and shared between devices), so it does not drop back to direct play and flip between 8-bit and 10-bit.
+- The 8-bit / 10-bit readout now shows what the file really is, not what the transcoder does.
+
 ## Subtitles
 
 ### Styled and positioned subtitles (ASS/SSA)

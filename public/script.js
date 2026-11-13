@@ -130,7 +130,8 @@ let currentParentDir = '';
 let activeAudioStreamIndex = '0:a:0';
 let isTranscodingMode = false;
 let transcodeBaseOffset = 0;
-let isCurrentFile10Bit = false;
+let isCurrentFile10Bit = false;   // true = the transcoder must re-encode the picture (real 10-bit, or compatibility mode)
+let sourceIs10Bit = false;        // what the FILE really is (used for the 8-bit/10-bit readout)
 let compatMode = false;
 let nativeFallbackTried = false;
 let preferredDefaultLang = 'auto';
@@ -1159,7 +1160,7 @@ function updateQualityReadout() {
   if (!qv || !qt) return;
   const h = video.videoHeight;
   qv.textContent = h > 0 ? `${h}p` : (playerResBadge.textContent || 'Auto');
-  const ten = !!isCurrentFile10Bit;
+  const ten = !!sourceIs10Bit;
   let label;
   if (isTranscodingMode) label = ten ? '10-bit \u00b7 Decoding' : (compatMode ? '8-bit \u00b7 Compat' : '8-bit \u00b7 Transcode');
   else label = ten ? '10-bit \u00b7 Native' : '8-bit \u00b7 Direct';
@@ -1307,6 +1308,8 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   nativeFallbackTried = false;
   compatMode = false;
   isCurrentFile10Bit = false;
+  sourceIs10Bit = false;
+  frameStuck = 0;
   isTranscodingMode = false;
   currentExplicitDuration = 0;
   activeAudioStreamIndex = '0:a:0';
@@ -1353,6 +1356,9 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
     currentExplicitDuration = Number(meta.duration) || 0;
     playerDurationBadge.textContent = formatTime(currentExplicitDuration);
     isCurrentFile10Bit = !!meta.is10BitHevc;
+    sourceIs10Bit = isCurrentFile10Bit;
+    // sticky mode: if this episode once needed the transcoder, it starts there every time (no flipping back to direct)
+    if (!isCurrentFile10Bit && vpGet(relPath).tc) { compatMode = true; isCurrentFile10Bit = true; }
     setChapters(meta.chapters || []);
 
     audioTrackList.innerHTML = '';
@@ -1474,6 +1480,7 @@ function fallbackToTranscode(msg) {
   nativeFallbackTried = true;
   compatMode = true;
   isCurrentFile10Bit = true; // forces full video transcode to H.264
+  try { vpSet(activeVideoPath, { tc: 1 }); } catch (e) {}      // remember: stay on the transcoder for this episode
   showToast(msg, 4000);
   startTranscodeAt(video.currentTime || 0);
   return true;
@@ -1491,6 +1498,26 @@ function armPictureWatch() {
     if (video.videoWidth === 0 || frames === 0) fallbackToTranscode('No picture from this video — switching to compatibility transcode');
   }, 3500);
 }
+
+/* v1.15 automatic mode switching: a frozen picture (sound keeps going) restarts the stream, or moves direct play to the transcoder.
+   Once an episode has needed the transcoder it stays there (sticky, saved per episode). */
+let frameStuck = 0, frameLast = -1, timeLast = -1, fixTimes = [];
+setInterval(() => {
+  try {
+    if (!activeVideoPath || video.paused || video.seeking || video.ended || document.hidden || internalPause || video.readyState < 3 || !video.getVideoPlaybackQuality) { frameStuck = 0; frameLast = -1; return; }
+    const f = video.getVideoPlaybackQuality().totalVideoFrames, t = video.currentTime;
+    if (frameLast >= 0 && f === frameLast && t - timeLast > 0.6) frameStuck++; else frameStuck = 0;
+    frameLast = f; timeLast = t;
+    if (frameStuck < 3) return;
+    frameStuck = 0; frameLast = -1;
+    if (!isTranscodingMode) { fallbackToTranscode('Picture froze — switching to compatibility mode'); return; }
+    const now = Date.now(); fixTimes = fixTimes.filter((x) => now - x < 120000);
+    if (fixTimes.length >= 3) return;                                   // do not loop forever
+    fixTimes.push(now);
+    showToast('Picture froze — restarting the stream', 2500);
+    startTranscodeAt(absoluteTime(), 'Fixing frozen picture...');
+  } catch (e) {}
+}, 1000);
 video.addEventListener('error', () => {
   if (!activeVideoPath || !video.getAttribute('src')) return;
   playerBufferingIndicator.classList.remove('show');
