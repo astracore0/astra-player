@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.15.2
+- setup.sh: one-command setup for Termux, Linux, macOS, WSL and Codespaces (--whisper, --media, --dry-run).
+
 ## v1.15.1
 - Automatic mode switching: a frozen picture (sound keeps playing) restarts the stream, or moves direct play to the compatibility transcoder.
 - Sticky mode: an episode that once needed the transcoder stays on it (saved per episode, shared between devices).
