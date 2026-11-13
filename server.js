@@ -988,13 +988,21 @@ function vttToSrt(vtt) {
 }
 const AI_EXPORT_DIR = path.join(AI_DIR, '..', 'export');
 function aiExport(job, vtt) {
+  const base = niceSubName(job.relPath, job.mode);
   try {
     fs.mkdirSync(AI_EXPORT_DIR, { recursive: true });
-    const name = niceSubName(job.relPath, job.mode);
+    // never overwrite a different subtitle of the same episode: another language / model / translation gets its own name
+    const taken = (n) => Object.keys(aiIndex).some((k) => k !== job.key && aiIndex[k] && aiIndex[k].name === n);
+    let name = base;
+    if (taken(name)) {
+      const tag = job.translate ? 'translated' : (job.langUsed || (job.lang && job.lang !== 'auto' ? job.lang : '') || 'auto');
+      name = `${base} (${tag})`;
+      for (let n = 2; taken(name) && n < 50; n++) name = `${base} (${tag} ${n})`;
+    }
     fs.writeFileSync(path.join(AI_EXPORT_DIR, `${name}.vtt`), vtt, 'utf-8');
     fs.writeFileSync(path.join(AI_EXPORT_DIR, `${name}.srt`), vttToSrt(vtt), 'utf-8');
     return name;
-  } catch (e) { return niceSubName(job.relPath, job.mode); }
+  } catch (e) { return base; }
 }
 const LANG3 = { jpn: 'ja', eng: 'en', hin: 'hi', kor: 'ko', zho: 'zh', chi: 'zh', spa: 'es', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de', rus: 'ru', ara: 'ar', ita: 'it', por: 'pt', tha: 'th', ind: 'id', tam: 'ta', tel: 'te' };
 /* The audio track usually says what language it is: then whisper does not waste time detecting it. */
@@ -1227,6 +1235,7 @@ function buildGated(wavFile, outFile, segs, total) {
   wavWrite(outFile, Buffer.concat(parts), rate);
   return {
     seconds: cs,
+    segs,
     map(t, edge) {
       for (const m of map) if (t >= m.cs && t <= m.ce) return m.os + (t - m.cs);
       for (let i = 0; i < map.length; i++) {                      // inside a gap: start snaps forward, end snaps back
@@ -1235,6 +1244,27 @@ function buildGated(wavFile, outFile, segs, total) {
       const l = map[map.length - 1]; return l.os + (l.ce - l.cs);
     },
   };
+}
+/* Whisper's own times drift a little either way. The silence scan knows where speech really starts and stops,
+   so a line that opens/closes next to a speech edge is moved onto that edge. */
+function snapToSpeech(cues, segs, ss) {
+  const EDGE = 0.2, TOL = 1.5, out = cues.map((c) => ({ ...c }));
+  segs.forEach(([a0, b0]) => {
+    const a = a0 + ss + EDGE, b = b0 + ss - EDGE;
+    if (b - a < 0.3) return;
+    let first = null, last = null;
+    out.forEach((c) => {
+      if (c.s >= a - TOL && c.s <= b && (!first || c.s < first.s)) first = c;
+      if (c.e >= a && c.e <= b + TOL && (!last || c.e > last.e)) last = c;
+    });
+    if (first && Math.abs(first.s - a) <= TOL) first.s = Math.max(0, a);
+    if (last && Math.abs(last.e - b) <= TOL && b - last.s >= 0.4) last.e = b;
+  });
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].e < out[i].s + 0.4) out[i].e = out[i].s + 0.4;
+    if (out[i + 1] && out[i].e > out[i + 1].s) out[i].e = Math.max(out[i].s + 0.3, out[i + 1].s);
+  }
+  return out;
 }
 function aiSilences(file) {
   return new Promise((resolve) => {
@@ -1456,6 +1486,7 @@ async function aiRun(job) {
         }
         cues = res.cues.filter((c) => c.s >= start - 0.01 && (i === list.length - 1 || c.s < start + len));    // each chunk owns the cues that START inside it
         cues = cleanCues(cues);
+        if (gate && !(savedConfig.whisper && savedConfig.whisper.snap === false)) cues = snapToSpeech(cues, gate.segs, ss);
       }
       try { fs.unlinkSync(wav); } catch (e) {}
       try { fs.unlinkSync(path.join(job.workDir, `${i}.gate.wav`)); } catch (e) {}

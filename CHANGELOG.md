@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.16.0
+- Subtitle timing: lines that open/close next to a real speech edge are snapped onto it (`"whisper": {"snap": false}` turns it off).
+- Unique subtitle names: another language/model/translation of the same episode gets its own file name instead of replacing the old one.
+- Subtitles that land on the same spot are stacked (up/down) instead of printed over each other.
+- setup.sh now does the full setup by default (whisper.cpp and models included; `--no-whisper` to skip) and verifies the result. The release zip now includes package.json, setup.sh and CHANGELOG.md.
+
 ## v1.15.2
 - setup.sh: one-command setup for Termux, Linux, macOS, WSL and Codespaces (--whisper, --media, --dry-run).
 

@@ -706,6 +706,22 @@ function updateSubtitleDisplay() {
     el.style.textShadow = `-1px -1px 0 ${o}, 1px -1px 0 ${o}, -1px 1px 0 ${o}, 1px 1px 0 ${o}, 0 0 6px ${o}`;
     subPosLayer.appendChild(el);
   });
+  // two lines wanting the same spot: stack them (bottom/middle anchors grow upward, top anchors downward) instead of overprinting
+  const els = [...subPosLayer.children];
+  for (let i = 1; i < els.length; i++) {
+    for (let pass = 0; pass < 8; pass++) {
+      const r = els[i].getBoundingClientRect(); let moved = false;
+      for (let j = 0; j < i; j++) {
+        const o = els[j].getBoundingClientRect();
+        if (r.left < o.right && r.right > o.left && r.top < o.bottom - 1 && r.bottom > o.top + 1) {
+          const up = placed[i].an < 7;
+          const dy = up ? -(r.bottom - o.top + 2) : (o.bottom - r.top + 2);
+          els[i].style.top = `${parseFloat(els[i].style.top) + dy}px`; moved = true; break;
+        }
+      }
+      if (!moved) break;
+    }
+  }
 }
 
 function setupSubtitleCues() {

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Astra Player setup: Termux (Android), Linux (Debian/Ubuntu, Fedora, Arch, Alpine), GitHub Codespaces, macOS, WSL.
 #
-#   bash setup.sh                     install everything needed, ask nothing
-#   bash setup.sh --whisper           also build whisper.cpp + models for AI subtitles
+#   bash setup.sh                     full setup: Node, ffmpeg, app, whisper.cpp + models (AI subtitles)
+#   bash setup.sh --no-whisper        skip whisper.cpp (no AI subtitles, much faster)
 #   bash setup.sh --media /path       set the media folder
 #   bash setup.sh --port 3000         remember the port (written to start.sh)
 #   bash setup.sh --dry-run           show what would be done, change nothing
@@ -10,7 +10,7 @@
 set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WHISPER=0; MEDIA=""; PORT="3000"; DRY=0; WHISPER_MODEL="base"
+WHISPER=1; MEDIA=""; PORT="3000"; DRY=0; WHISPER_MODEL="base"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m OK\033[0m %s\n' "$*"; }
@@ -22,6 +22,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --whisper) WHISPER=1 ;;
+    --no-whisper) WHISPER=0 ;;
     --media) shift; MEDIA="${1:-}" ;;
     --port) shift; PORT="${1:-3000}" ;;
     --model) shift; WHISPER_MODEL="${1:-base}" ;;
@@ -179,7 +180,7 @@ if [ "$WHISPER" = 1 ]; then
     cd "$DIR" || true
   fi
 else
-  have whisper-cli || [ -x "$HOME/whisper.cpp/build/bin/whisper-cli" ] || say "AI subtitles are optional: run  bash setup.sh --whisper  to add them"
+  say "Skipping whisper.cpp (AI subtitles off). Run  bash setup.sh  again without --no-whisper to add them"
 fi
 
 # ---------------------------------------------------------------- start script
@@ -192,6 +193,22 @@ $( [ "$OS" = "termux" ] && echo 'command -v termux-wake-lock >/dev/null 2>&1 && 
 exec node server.js
 EOF
   chmod +x "$DIR/start.sh"
+fi
+
+# ---------------------------------------------------------------- check what is in place
+if [ "$DRY" != 1 ]; then
+  say "Checking the install"
+  chk() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else warn "$1 - MISSING"; fi; }
+  chk "node $(node -v 2>/dev/null)"        "have node"
+  chk "ffmpeg + ffprobe"                    "have ffmpeg && have ffprobe"
+  chk "express (npm dependencies)"          "[ -d '$DIR/node_modules/express' ]"
+  chk "media folder ${MEDIA:-(not set)}"    "[ -n '$MEDIA' ] && [ -d '$MEDIA' ]"
+  if [ "$WHISPER" = 1 ]; then
+    chk "whisper-cli"                       "[ -x '$HOME/whisper.cpp/build/bin/whisper-cli' ] || have whisper-cli"
+    chk "model ggml-tiny.bin"               "[ -f '$HOME/whisper.cpp/models/ggml-tiny.bin' ]"
+    chk "model ggml-$WHISPER_MODEL.bin"     "[ -f '$HOME/whisper.cpp/models/ggml-$WHISPER_MODEL.bin' ]"
+    chk "voice-detection model (optional)"  "ls '$HOME'/whisper.cpp/models/ggml-silero*.bin"
+  fi
 fi
 
 # ---------------------------------------------------------------- done
