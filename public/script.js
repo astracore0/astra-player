@@ -628,6 +628,7 @@ function hideSubtitle() {
   subTopBox.style.display = 'none';
   subTopBox.innerHTML = '';
   subPosLayer.textContent = '';
+  assAnims.length = 0;
 }
 
 let activeSubSignature = '';
@@ -644,6 +645,158 @@ function pictureRect() {
   return { x: (W - w) / 2, y: (H - h) / 2, w, h };
 }
 
+/* ---- ASS engine renderer (v1.17): draws <ass:…> cues with positions, 9-grid anchors, fades, moves,
+   \t transforms, karaoke and vector drawings (SVG), animated with the Web Animations API. ---- */
+const ASS_RE = /^<ass:([A-Za-z0-9_-]+)>/;
+const assAnims = [];                       // { a: Animation, cue }
+function assDecode(raw) {
+  const m = ASS_RE.exec(raw);
+  if (!m) return null;
+  try {
+    const b = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(escape(atob(b + '==='.slice((b.length + 3) % 4))));
+    return { info: JSON.parse(json), plain: raw.slice(m[0].length) };
+  } catch (_) { return null; }
+}
+function assTimeline(info, key, start) {   // numeric \t timeline for one property: [[ms,value],...]
+  const pts = [[0, start]]; let v = start;
+  (info.tf || []).filter((t) => t.p[key] != null).sort((a, b) => a.t1 - b.t1).forEach((t) => {
+    pts.push([t.t1, v]); pts.push([t.t2, t.p[key]]); v = t.p[key];
+  });
+  return pts.length > 1 ? pts : null;
+}
+function assAt(pts, ms) {
+  if (ms <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) {
+    if (ms <= pts[i][0]) { const [t0, v0] = pts[i - 1], [t1, v1] = pts[i]; return t1 === t0 ? v1 : v0 + (v1 - v0) * (ms - t0) / (t1 - t0); }
+  }
+  return pts[pts.length - 1][1];
+}
+function renderAss(info, cue, rect, layer) {
+  const [rx, ry] = info.r, kx = rect.w / rx, ky = rect.h / ry, b = info.base;
+  const dur = Math.max(1, (cue.endTime - cue.startTime) * 1000);
+  const an = info.an, colA = an % 3 === 1 ? 0 : an % 3 === 2 ? 1 : 2, rowA = an >= 7 ? 0 : an >= 4 ? 1 : 2;
+  let ax, ay, maxW;
+  if (info.pos) { ax = info.pos[0]; ay = info.pos[1]; maxW = rect.w; }
+  else if (info.mv) { ax = info.mv[0]; ay = info.mv[1]; maxW = rect.w; }
+  else {
+    const [ml, mr, mv] = info.mr;
+    ax = colA === 0 ? ml : colA === 1 ? (rx + ml - mr) / 2 : rx - mr;
+    ay = rowA === 0 ? mv : rowA === 1 ? ry / 2 : ry - mv;
+    maxW = Math.max(40, (rx - ml - mr) * kx);
+  }
+  const outer = document.createElement('div');
+  outer.className = 'sub-ass';
+  outer.style.left = `${rect.x + ax * kx}px`; outer.style.top = `${rect.y + ay * ky}px`;
+  const fade = document.createElement('div'); fade.className = 'sub-ass-l';
+  const rot = document.createElement('div'); rot.className = 'sub-ass-l';
+  const box = document.createElement('div'); box.className = 'sub-ass-box';
+  outer.appendChild(fade); fade.appendChild(rot); rot.appendChild(box);
+  const px = (v) => `${v * ky}px`;
+  const anims = [];
+  const anim = (el, frames) => { try { const a = el.animate(frames, { duration: dur, fill: 'both', easing: 'linear' }); a.pause(); anims.push(a); } catch (_) { /* old browser: static */ } };
+
+  box.style.transform = `translate(${-colA * 50}%, ${-rowA * 50}%)`;
+  box.style.textAlign = colA === 0 ? 'left' : colA === 1 ? 'center' : 'right';
+  box.style.maxWidth = `${maxW}px`;
+  box.style.fontFamily = b.fn ? `"${b.fn}", "Noto Sans", Arial, sans-serif` : 'Arial, "Noto Sans", sans-serif';
+  box.style.fontSize = px(b.fs || 48);
+  box.style.color = `#${b.c1}`;
+  if (b.b) box.style.fontWeight = '700';
+  if (b.i) box.style.fontStyle = 'italic';
+  box.style.textDecoration = [b.u ? 'underline' : '', b.s ? 'line-through' : ''].join(' ').trim() || 'none';
+  const outline = `#${b.c3}`;
+  if (info.box) { box.style.background = outline; box.style.padding = px(b.bord || 2); }
+  else if (b.bord > 0) { box.style.webkitTextStroke = `${2 * b.bord * ky}px ${outline}`; box.style.paintOrder = 'stroke fill'; }
+  if (b.shad > 0) box.style.textShadow = `${px(b.shad)} ${px(b.shad)} 0 rgba(0,0,0,.55)`;
+  if (b.blur > 0 || (info.tf || []).some((t) => t.p.blur != null)) box.style.filter = `blur(${b.blur * ky * 0.6}px)`;
+  if (b.a < 1) rot.style.opacity = String(b.a);
+
+  // transform group on the rotation layer (origin = the anchor point)
+  const frz = assTimeline(info, 'frz', b.frz), sx = assTimeline(info, 'sx', b.sx), sy = assTimeline(info, 'sy', b.sy);
+  const tfm = (ms) => `rotate(${-(frz ? assAt(frz, ms) : b.frz)}deg) scale(${(sx ? assAt(sx, ms) : b.sx) / 100}, ${(sy ? assAt(sy, ms) : b.sy) / 100})`;
+  rot.style.transformOrigin = '0 0';
+  rot.style.transform = tfm(0);
+  if (frz || sx || sy) {
+    const ms = [...new Set([0, dur, ...[frz, sx, sy].filter(Boolean).flatMap((p) => p.map((q) => q[0]))])].filter((x) => x >= 0 && x <= dur).sort((a, c) => a - c);
+    anim(rot, ms.map((t) => ({ offset: t / dur, transform: tfm(t) })));
+  }
+  const fs = assTimeline(info, 'fs', b.fs || 48);
+  if (fs) anim(box, fs.map(([t, v]) => ({ offset: Math.min(1, t / dur), fontSize: px(v) })));
+  const al = assTimeline(info, 'a', b.a);
+  if (al) anim(rot, al.map(([t, v]) => ({ offset: Math.min(1, t / dur), opacity: v })));
+  const bl = assTimeline(info, 'blur', b.blur);
+  if (bl) anim(box, bl.map(([t, v]) => ({ offset: Math.min(1, t / dur), filter: `blur(${v * ky * 0.6}px)` })));
+  const bo = assTimeline(info, 'bord', b.bord);
+  if (bo && !info.box) anim(box, bo.map(([t, v]) => ({ offset: Math.min(1, t / dur), webkitTextStrokeWidth: `${2 * v * ky}px` })));
+  const tc = (info.tf || []).filter((t) => t.p.c1).sort((a, c) => a.t1 - c.t1);
+  if (tc.length) {
+    const fr = [{ offset: 0, color: `#${b.c1}` }]; let last = b.c1;
+    tc.forEach((t) => { fr.push({ offset: Math.min(1, t.t1 / dur), color: `#${last}` }, { offset: Math.min(1, t.t2 / dur), color: `#${t.p.c1}` }); last = t.p.c1; });
+    fr.push({ offset: 1, color: `#${last}` });
+    anim(box, fr);
+  }
+  if (info.fd) anim(fade, info.fd.map(([t, v]) => ({ offset: Math.min(1, t / dur), opacity: v })));
+  if (info.mv) {
+    const [x1, y1, x2, y2, t1, t2] = info.mv, L = (x) => `${rect.x + x * kx}px`, T = (y) => `${rect.y + y * ky}px`;
+    anim(outer, [{ offset: 0, left: L(x1), top: T(y1) }, { offset: Math.min(1, t1 / dur), left: L(x1), top: T(y1) },
+      { offset: Math.min(1, Math.max(t1, t2) / dur), left: L(x2), top: T(y2) }, { offset: 1, left: L(x2), top: T(y2) }]);
+  }
+
+  if (info.dr) {
+    const d = info.dr, ns = 'http://www.w3.org/2000/svg', pad = (d.bord || 0) + 1;
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', `${d.x - pad} ${d.y - pad} ${d.w + 2 * pad} ${d.h + 2 * pad}`);
+    svg.style.width = `${(d.w + 2 * pad) * kx}px`; svg.style.height = `${(d.h + 2 * pad) * ky}px`;
+    svg.style.overflow = 'visible'; svg.style.display = 'block';
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', d.d); p.setAttribute('fill', `#${d.c}`);
+    if (d.bord > 0 && !info.box) { p.setAttribute('stroke', `#${d.o}`); p.setAttribute('stroke-width', String(d.bord * 2)); p.setAttribute('paint-order', 'stroke'); p.setAttribute('stroke-linejoin', 'round'); }
+    svg.appendChild(p);
+    box.style.webkitTextStroke = '0'; box.style.width = 'max-content';
+    box.appendChild(svg);
+  } else {
+    (info.runs || []).forEach((r) => {
+      const mk = (txt, extra) => {
+        const sp = document.createElement('span'); sp.textContent = txt;
+        if (r.c1) sp.style.color = `#${r.c1}`;
+        if (r.fs) sp.style.fontSize = px(r.fs);
+        if (r.fn) sp.style.fontFamily = `"${r.fn}", "Noto Sans", Arial, sans-serif`;
+        if (r.b != null) sp.style.fontWeight = r.b ? '700' : '400';
+        if (r.i != null) sp.style.fontStyle = r.i ? 'italic' : 'normal';
+        if (r.u != null || r.s != null) sp.style.textDecoration = [(r.u != null ? r.u : b.u) ? 'underline' : '', (r.s != null ? r.s : b.s) ? 'line-through' : ''].join(' ').trim() || 'none';
+        if (r.bord != null) sp.style.webkitTextStrokeWidth = `${2 * r.bord * ky}px`;
+        if (extra) extra(sp);
+        box.appendChild(sp); return sp;
+      };
+      if (r.k) {
+        const [st, kd, ty] = r.k, after = `#${r.c1 || b.c1}`, before = `#${b.c2 || b.c1}`;
+        const chars = ty === 'f' && r.t.length > 1 ? [...r.t] : [r.t];
+        chars.forEach((ch, i) => mk(ch, (sp) => {
+          const t0 = st + kd * i / chars.length, t1 = t0 + Math.max(1, kd / chars.length);
+          sp.style.color = before;
+          anim(sp, [{ offset: 0, color: before }, { offset: Math.min(1, t0 / dur), color: before }, { offset: Math.min(1, t1 / dur), color: after }, { offset: 1, color: after }]);
+        }));
+      } else mk(r.t);
+    });
+  }
+  layer.appendChild(outer);
+  anims.forEach((a) => assAnims.push({ a, cue }));
+  return outer;
+}
+// keep every animation locked to the video clock (seek, pause, play)
+function assSyncAnims() {
+  if (!assAnims.length) return;
+  const t = absoluteTime() - subDelay;
+  for (const it of assAnims) {
+    const ms = Math.max(0, (t - it.cue.startTime) * 1000);
+    try {
+      if (Math.abs((it.a.currentTime || 0) - ms) > 120 || video.paused) it.a.currentTime = ms;
+      if (video.paused) { if (it.a.playState === 'running') it.a.pause(); } else if (it.a.playState !== 'running') it.a.play();
+    } catch (_) { /* ignore */ }
+  }
+}
+
 // Cues are matched against the position in the ORIGINAL file, so subtitles stay
 // in sync after a seek in a transcoded stream (where video.currentTime restarts at 0).
 function updateSubtitleDisplay() {
@@ -658,13 +811,17 @@ function updateSubtitleDisplay() {
   let topText = '';
   let bottomText = '';
   const placed = [];
+  const assList = [];
 
   for (let i = 0; i < cues.length; i++) {
     const cue = cues[i];
     if (cue.startTime > t || cue.endTime <= t) continue;
     const raw = cue.text || '';
-    const pm = POS_RE.exec(raw);
-    if (pm) {
+    const am = ASS_RE.test(raw) ? assDecode(raw) : null;
+    const pm = am ? null : POS_RE.exec(raw);
+    if (am) {
+      assList.push({ cue, i, info: am.info });
+    } else if (pm) {
       placed.push({ x: +pm[1], y: +pm[2], an: +pm[3], fs: pm[4] ? +pm[4] : 0, c1: pm[5], c3: pm[6], html: formatCueText(raw.slice(pm[0].length)) });
     } else if (raw.includes('<position:top>')) {
       topText += formatCueText(raw.replace(/<position:top>/g, '')) + '<br>';
@@ -673,11 +830,11 @@ function updateSubtitleDisplay() {
     }
   }
 
-  const rect = placed.length ? pictureRect() : null;
-  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
-  if (signature === activeSubSignature) return;
+  const rect = (placed.length || assList.length) ? pictureRect() : null;
+  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${assList.map((a) => a.i + ':' + a.cue.startTime).join(',')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
+  if (signature === activeSubSignature) { assSyncAnims(); return; }
 
-  if (!topText && !bottomText && !placed.length) {
+  if (!topText && !bottomText && !placed.length && !assList.length) {
     hideSubtitle();
     return;
   }
@@ -691,6 +848,9 @@ function updateSubtitleDisplay() {
   subDisplayBox.style.display = bottomText ? 'inline-block' : 'none';
 
   subPosLayer.textContent = '';
+  assAnims.length = 0;
+  assList.forEach((a) => renderAss(a.info, a.cue, rect, subPosLayer));
+  assSyncAnims();
   placed.forEach((p) => {
     const el = document.createElement('span');
     el.className = 'sub-pos';
@@ -707,7 +867,7 @@ function updateSubtitleDisplay() {
     subPosLayer.appendChild(el);
   });
   // two lines wanting the same spot: stack them (bottom/middle anchors grow upward, top anchors downward) instead of overprinting
-  const els = [...subPosLayer.children];
+  const els = [...subPosLayer.querySelectorAll('.sub-pos')];
   for (let i = 1; i < els.length; i++) {
     for (let pass = 0; pass < 8; pass++) {
       const r = els[i].getBoundingClientRect(); let moved = false;
@@ -3156,3 +3316,5 @@ loadLibrary(true);
     wrap.appendChild(mk('+', 1, 'Increase'));
   });
 })();
+
+['play', 'pause', 'seeked', 'ratechange'].forEach((ev) => video.addEventListener(ev, () => setTimeout(assSyncAnims, 0)));

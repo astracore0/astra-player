@@ -4,6 +4,9 @@ Astra Player is a lightweight, offline-first media server and web player designe
 
 ---
 
+## Subtitle styling (v1.17)
+ASS/SSA tracks are drawn with their own animation and placement: corners/top/middle/bottom, move, fades, \t transforms, karaoke, rotation, outline/shadow, named fonts and vector drawings (as SVG). Plain dialogue follows your subtitle settings. Embedded fonts and \clip are not supported yet.
+
 ## Key Features
 
 - **Low memory footprint:** idles between 30 MB and 45 MB of RAM, preventing background process termination on Android devices.

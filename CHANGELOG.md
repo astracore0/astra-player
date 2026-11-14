@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.17.0 (subtitle engine)
+- ASS subtitles now draw like a real player: all 9 screen positions (corners, top, middle, bottom) with the file's margins, \pos and \move paths, \fad/\fade fades, \t animation (rotate, scale, size, colour, blur, outline), karaoke (\k/\kf/\ko), rotation, outline/shadow/blur, fonts named in the file, bold/italic/underline/strike, and vector drawings (\p) rendered as SVG shapes.
+- Animations stay locked to the video clock: they pause with the video and re-sync after a seek.
+- Plain dialogue (no special tags) still uses your own subtitle size/colour settings.
+- Subtitle cache is rebuilt once so old tracks pick up the new data.
+- Not included: embedded font files from the MKV, \clip masks, 3D rotation (\frx/\fry).
+
 ## v1.16.1 (self-audit fixes)
 - Timing snap no longer pulls a line onto the neighbouring speech stretch's edge.
 - Loop cleanup is gentler on real dialogue ("No, no, no!" and a line said twice stay) and stronger on loops: a whole block of lines repeated straight after itself is dropped; wrong-script junk (Hangul/CJK/\ufffd) is removed from English/Latin-language subtitles.
