@@ -261,12 +261,17 @@ app.post('/api/settings/root', (req, res) => {
 /* ------------------------------------------------------------------ */
 /* Metadata (ffprobe)                                                  */
 /* ------------------------------------------------------------------ */
+const metaCache = new Map();   // ffprobe results: reopening an episode (or the next one, prefetched) is instant
+function metaCacheSet(k, v) { if (metaCache.size > 300) metaCache.delete(metaCache.keys().next().value); metaCache.set(k, v); }
 app.get('/api/video/metadata', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).json({ error: r.error });
 
   markInteractive(15000);
-  const args = ['-v', 'quiet', '-analyzeduration', '5000000', '-probesize', '5000000', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', r.path];
+  const mkey = `${r.path}|${r.stat.size}|${r.stat.mtimeMs}`;
+  const hit = metaCache.get(mkey);
+  if (hit) { res.set('Cache-Control', 'private, max-age=60'); prefetchSubtitles(r, hit.subtitleTracks); return res.json(hit); }
+  const args = ['-v', 'quiet', '-analyzeduration', '3000000', '-probesize', '3000000', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', r.path];
   execFile('ffprobe', args, { maxBuffer: 16 * 1024 * 1024, timeout: 30000 }, (err, stdout) => {
     if (err) {
       return res.json({
@@ -320,7 +325,9 @@ app.get('/api/video/metadata', (req, res) => {
         }
       });
 
-      res.json({ audioTracks, subtitleTracks, is10BitHevc, duration, chapters });
+      const out = { audioTracks, subtitleTracks, is10BitHevc, duration, chapters, size: r.stat.size };
+      if (duration > 0) metaCacheSet(mkey, out);
+      res.json(out);
       prefetchSubtitles(r, subtitleTracks); // background, instant subtitles later
     } catch (e) {
       res.json({ audioTracks: [], subtitleTracks: [], is10BitHevc: false, duration: 0, chapters: [] });
@@ -419,6 +426,159 @@ function assColor(v) {
   return h.slice(4, 6) + h.slice(2, 4) + h.slice(0, 2);
 }
 
+/* ---- ASS override-tag engine (v1.17): turns one Dialogue line into a compact JSON description
+   that the player draws itself (positions, fades, moves, \t animation, karaoke, vector drawings). ---- */
+const ASS_TAG_RE = /\\(?:(pos|move|org|fade|fad|clip|iclip)\(([^)]*)\)|(1c|2c|3c|4c|1a|2a|3a|4a|alpha|an|fscx|fscy|fsp|frz|frx|fry|fax|fay|fr|fs|fn|bord|xbord|ybord|shad|xshad|yshad|blur|be|kf|ko|kt|k|K|pbo|p|b|i|u|s|q|a|c|r|fe)([^\\}]*))/g;
+const num = (v, d = 0) => { const n = parseFloat(v); return Number.isFinite(n) ? n : d; };
+const alphaOf = (v) => { const m = /([0-9a-f]{2})/i.exec(String(v || '')); return m ? +(1 - parseInt(m[1], 16) / 255).toFixed(3) : 1; };
+
+function assDrawing(src, scale) {
+  const k = 1 / Math.pow(2, Math.max(1, scale) - 1);
+  const tk = String(src).trim().split(/\s+/);
+  let d = '', cmd = '', pts = [], cur = null, minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  const P = (x, y) => { x *= k; y *= k; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; return [x, y]; };
+  const f2 = (n) => +n.toFixed(2);
+  const flush = () => {
+    if (!pts.length) return;
+    if (cmd === 'm' || cmd === 'n') { cur = pts[pts.length - 1]; d += `${d && cmd === 'm' ? 'Z ' : ''}M${f2(cur[0])} ${f2(cur[1])} `; }
+    else if (cmd === 'l') { pts.forEach((p) => { d += `L${f2(p[0])} ${f2(p[1])} `; cur = p; }); }
+    else if (cmd === 'b') { for (let i = 0; i + 2 < pts.length; i += 3) { d += `C${pts.slice(i, i + 3).map((p) => `${f2(p[0])} ${f2(p[1])}`).join(' ')} `; cur = pts[i + 2]; } }
+    else if (cmd === 's' && cur) {
+      const q = [cur, ...pts]; if (q.length >= 4) {
+        for (let i = 0; i + 3 < q.length; i++) {
+          const [a, b, c, e] = [q[i], q[i + 1], q[i + 2], q[i + 3]];
+          for (let s = 1; s <= 6; s++) {
+            const t = s / 6, t2 = t * t, t3 = t2 * t;
+            const w0 = (1 - t) ** 3 / 6, w1 = (3 * t3 - 6 * t2 + 4) / 6, w2 = (-3 * t3 + 3 * t2 + 3 * t + 1) / 6, w3 = t3 / 6;
+            d += `L${f2(w0 * a[0] + w1 * b[0] + w2 * c[0] + w3 * e[0])} ${f2(w0 * a[1] + w1 * b[1] + w2 * c[1] + w3 * e[1])} `;
+          }
+        }
+      }
+    }
+    pts = [];
+  };
+  for (let i = 0; i < tk.length; i++) {
+    const w = tk[i].toLowerCase();
+    if (/^[mnlbspc]$/.test(w)) { flush(); cmd = w; continue; }
+    if (/^-?[\d.]+$/.test(w) && /^-?[\d.]+$/.test(tk[i + 1] || '')) { pts.push(P(+w, +tk[i + 1])); i++; }
+  }
+  flush();
+  if (!d || minX > maxX) return null;
+  return { d: d.trim() + ' Z', x: f2(minX), y: f2(minY), w: f2(Math.max(0.5, maxX - minX)), h: f2(Math.max(0.5, maxY - minY)) };
+}
+
+/* returns null for a plain line (normal text rendering is fine) or {info, plain} for one that needs the engine */
+function assCueInfo(text, st, ev, res, durMs, ff) {
+  const sb = { c1: st.c1 || 'ffffff', fs: st.fs || 0, fn: st.fn || '' };
+  const fsK = ff ? 0.4 : 1;   // SRT <font size> is in video pixels (~720p); ffmpeg's 384x288 canvas needs it scaled
+  const base = {
+    fs: st.fs || 0, c1: st.c1 || 'ffffff', c2: st.c2 || '', c3: st.c3 || '000000', fn: st.fn || '',
+    b: st.b ? 1 : 0, i: st.i ? 1 : 0, u: st.u ? 1 : 0, s: st.s ? 1 : 0,
+    bord: st.bord == null ? 2 : st.bord, shad: st.shad || 0, blur: 0, sx: st.sx || 100, sy: st.sy || 100, frz: st.ang || 0, a: 1
+  };
+  let cur = { ...base };
+  const g = { an: st.an || 2 };
+  const tf = [];
+  const runs = [];
+  let special = false, drawing = null, pMode = 0, pbo = 0, kAcc = 0, kNext = null, kStarted = false;
+  const diff = (c) => { const o = {}; for (const k of ['c1', 'fs', 'b', 'i', 'u', 's', 'fn', 'bord']) if (c[k] !== base[k]) o[k] = c[k]; return o; };
+  const parts = text.split(/(\{[^}]*\})/);
+  let first = true;
+
+  for (const part of parts) {
+    if (part.startsWith('{') && part.endsWith('}')) {
+      const body = part.slice(1, -1);
+      const apply = (o, tag, val) => {
+        switch (tag) {
+          case 'c': case '1c': o.c1 = String(val).trim() ? (assColor(val) || o.c1) : sb.c1; break;
+          case '2c': o.c2 = assColor(val) || o.c2; break;
+          case '3c': o.c3 = assColor(val) || o.c3; break;
+          case 'alpha': case '1a': o.a = alphaOf(val); break;
+          case 'fs': o.fs = String(val).trim() ? num(val, o.fs) * fsK : sb.fs; break;
+          case 'fscx': o.sx = num(val, 100); break;
+          case 'fscy': o.sy = num(val, 100); break;
+          case 'frz': case 'fr': o.frz = num(val); break;
+          case 'bord': o.bord = num(val); break;
+          case 'shad': o.shad = num(val); break;
+          case 'blur': case 'be': o.blur = num(val); break;
+          default: break;
+        }
+      };
+      const noT = body.replace(/\\t\(((?:[^()]|\([^()]*\))*)\)/g, (m, inner) => {
+        const a = inner.split(',');
+        let t1 = 0, t2 = durMs, acc = 1, tags = inner;
+        const nums = [];
+        while (a.length && /^\s*-?[\d.]+\s*$/.test(a[0]) && nums.length < 3) nums.push(num(a.shift()));
+        tags = a.join(',');
+        if (nums.length === 1) acc = nums[0]; else if (nums.length === 2) { t1 = nums[0]; t2 = nums[1]; } else if (nums.length === 3) { t1 = nums[0]; t2 = nums[1]; acc = nums[2]; }
+        const p = {}; let mm; const re = new RegExp(ASS_TAG_RE.source, 'g');
+        while ((mm = re.exec(tags))) if (mm[3]) apply(p, mm[3], mm[4]);
+        if (Object.keys(p).length) { tf.push({ t1, t2, acc, p }); special = true; }
+        return '';
+      });
+      let m; const re = new RegExp(ASS_TAG_RE.source, 'g');
+      while ((m = re.exec(noT))) {
+        if (m[1]) {
+          const a = m[2].split(',').map((x) => x.trim());
+          if (m[1] === 'pos' && a.length >= 2) { g.pos = [num(a[0]), num(a[1])]; special = true; }
+          else if (m[1] === 'move' && a.length >= 4) { g.mv = [num(a[0]), num(a[1]), num(a[2]), num(a[3]), a[4] != null ? num(a[4]) : 0, a[5] != null ? num(a[5]) : durMs]; special = true; }
+          else if (m[1] === 'fad' && a.length >= 2) { const i1 = num(a[0]), o1 = num(a[1]); g.fd = [[0, 0], [i1, 1], [Math.max(i1, durMs - o1), 1], [durMs, 0]]; special = true; }
+          else if (m[1] === 'fade' && a.length >= 7) {
+            const [a1, a2, a3, t1, t2, t3, t4] = a.map((x) => num(x));
+            const op = (x) => +(1 - x / 255).toFixed(3);
+            g.fd = [[0, op(a1)], [t1, op(a1)], [t2, op(a2)], [t3, op(a2)], [t4, op(a3)], [durMs, op(a3)]]; special = true;
+          } else if (m[1] === 'clip' || m[1] === 'iclip') { /* clip rectangles are not drawn */ }
+          continue;
+        }
+        const tag = m[3], val = m[4];
+        if (tag === 'an') { g.an = Math.min(9, Math.max(1, num(val, 2))); }
+        else if (tag === 'a') { const v = num(val, 2); g.an = ({ 1: 1, 2: 2, 3: 3, 5: 7, 6: 8, 7: 9, 9: 4, 10: 5, 11: 6 })[v] || 2; }
+        else if (tag === 'b') { cur.b = num(val, 0) ? 1 : 0; if (/^[1-9]\d\d/.test(val)) cur.b = parseInt(val, 10) >= 600 ? 1 : 0; }
+        else if (tag === 'i') cur.i = num(val, 0) ? 1 : 0;
+        else if (tag === 'u') cur.u = num(val, 0) ? 1 : 0;
+        else if (tag === 's') cur.s = num(val, 0) ? 1 : 0;
+        else if (tag === 'fn') { cur.fn = val.trim() || sb.fn; special = true; }
+        else if (tag === 'r') { cur = { ...base }; if (val && /^\S/.test(val)) { /* named style reset not resolved */ } }
+        else if (tag === 'p') { pMode = num(val, 0); if (pMode > 0) special = true; }
+        else if (tag === 'pbo') pbo = num(val);
+        else if (tag === 'k' || tag === 'K' || tag === 'kf' || tag === 'ko') { kNext = { d: num(val) * 10, type: tag === 'k' ? 'k' : tag === 'ko' ? 'k' : 'f' }; special = true; }
+        else if (tag === 'kt') kAcc = num(val) * 10;
+        else if (/^(c|1c|2c|3c|alpha|1a|fs|fscx|fscy|frz|fr|bord|shad|blur|be)$/.test(tag)) {
+          apply(cur, tag, val);
+          if (tag === 'c' || tag === '1c' || tag === 'fs') special = true;
+          if (/^(fscx|fscy|frz|fr|blur|be)$/.test(tag)) special = true;
+        }
+        else if (/^(frx|fry|fax|fay)$/.test(tag)) special = true;
+      }
+      if (first && !runs.length) Object.assign(base, { c1: cur.c1, c2: cur.c2, c3: cur.c3, fs: cur.fs, fn: cur.fn, b: cur.b, i: cur.i, u: cur.u, s: cur.s, bord: cur.bord, shad: cur.shad, blur: cur.blur, sx: cur.sx, sy: cur.sy, frz: cur.frz, a: cur.a });
+      continue;
+    }
+    if (!part) continue;
+    first = false;
+    if (pMode > 0) { const dr = assDrawing(part, pMode); if (dr) { dr.pbo = pbo; dr.c = cur.c1; dr.o = cur.c3; dr.bord = cur.bord; drawing = dr; } continue; }
+    const t = part.replace(/\\[Nn]/g, '\n').replace(/\\h/g, ' ');
+    if (!t) continue;
+    const run = { t, ...diff(cur) };
+    if (kNext) { run.k = [kAcc, kNext.d, kNext.type]; kAcc += kNext.d; kNext = null; kStarted = true; }
+    else if (kStarted) run.k = [kAcc, 0, 'k'];
+    runs.push(run);
+  }
+  if (g.an !== 2 && g.an !== 8) special = true;
+  if (!special) return null;
+  const plain = runs.map((r) => r.t).join('').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!plain && !drawing) return null;
+  const mr = [ev.ml || st.ml || 0, ev.mr || st.mr || 0, Math.max(ev.mv || st.mv || 0, ff ? res[1] * 0.07 : 0)];
+  const info = { r: res, an: g.an, base, mr };
+  if (st.bs === 3) info.box = 1;
+  if (g.pos) info.pos = g.pos;
+  if (g.mv) info.mv = g.mv;
+  if (g.fd) info.fd = g.fd;
+  if (tf.length) info.tf = tf;
+  if (drawing) info.dr = drawing;
+  else info.runs = runs;
+  return { info, plain };
+}
+
 function assToVtt(raw) {
   const lines = String(raw).replace(/^﻿/, '').split(/\r\n|\r|\n/);
   const styles = new Map();
@@ -442,11 +602,19 @@ function assToVtt(raw) {
         const f = line.slice(6).split(',');
         const name = (f[styleFmt.indexOf('name')] || '').trim();
         const align = parseInt(f[styleFmt.indexOf('alignment')], 10);
-        if (name) styles.set(name, {
-          top: align >= 7 && align <= 9, an: align || 2,
-          fs: parseFloat(f[styleFmt.indexOf('fontsize')]) || 0,
-          c1: assColor(f[styleFmt.indexOf('primarycolour')]), c3: assColor(f[styleFmt.indexOf('outlinecolour')])
-        });
+        if (name) {
+          const g = (k) => f[styleFmt.indexOf(k)];
+          styles.set(name, {
+            top: align >= 7 && align <= 9, an: align || 2,
+            fs: parseFloat(g('fontsize')) || 0, fn: (g('fontname') || '').trim(),
+            c1: assColor(g('primarycolour')), c2: assColor(g('secondarycolour')), c3: assColor(g('outlinecolour')),
+            b: parseInt(g('bold'), 10) !== 0 && g('bold') != null && String(g('bold')).trim() !== '0', i: String(g('italic')).trim() !== '0' && g('italic') != null,
+            u: String(g('underline')).trim() !== '0' && g('underline') != null, s: String(g('strikeout')).trim() !== '0' && g('strikeout') != null,
+            sx: parseFloat(g('scalex')) || 100, sy: parseFloat(g('scaley')) || 100, ang: parseFloat(g('angle')) || 0,
+            bs: parseInt(g('borderstyle'), 10) || 1, bord: parseFloat(g('outline')), shad: parseFloat(g('shadow')) || 0,
+            ml: parseInt(g('marginl'), 10) || 0, mr: parseInt(g('marginr'), 10) || 0, mv: parseInt(g('marginv'), 10) || 0
+          });
+        }
       }
     } else if (section === 'events') {
       if (/^format:/i.test(line)) {
@@ -458,7 +626,7 @@ function assToVtt(raw) {
         const text = parts.slice(textIdx).join(',');
         const start = assTimeToVtt(parts[evFmt.indexOf('start')]);
         const end = assTimeToVtt(parts[evFmt.indexOf('end')]);
-        if (!start || !end || /\{[^}]*\\p[1-9]/.test(text)) continue; // skip vector drawings
+        if (!start || !end) continue;
 
         const styleName = (parts[evFmt.indexOf('style')] || '').trim().replace(/^\*/, '');
         const st = styles.get(styleName) || {};
@@ -478,26 +646,63 @@ function assToVtt(raw) {
           .replace(/\\h/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
-        if (!clean) continue;
 
-        // \pos / \move place the text at an exact spot (karaoke syllables, signs): keep that spot.
-        const pm = /\\pos\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/.exec(text) || /\\move\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,/.exec(text);
-        let marker = '';
-        if (pm && resX > 0 && resY > 0) {
-          const fsM = /\\fs(\d+(?:\.\d+)?)/.exec(text);
-          const c1M = /\\1?c&?H?([0-9a-f]{6})&?/i.exec(text);
-          const c3M = /\\3c&?H?([0-9a-f]{6})&?/i.exec(text);
-          const fs = fsM ? parseFloat(fsM[1]) : (st.fs || 0);
-          const x = (Number(pm[1]) / resX * 100).toFixed(2), y = (Number(pm[2]) / resY * 100).toFixed(2);
-          marker = `<pos:${x},${y},${an},${fs ? (fs / resY * 100).toFixed(2) : ''},${c1M ? assColor(c1M[1]) : (st.c1 || '')},${c3M ? assColor(c3M[1]) : (st.c3 || '')}>`;
+        const toMs = (v) => { const m = /^(\d+):(\d\d):(\d\d)\.(\d+)/.exec(v); return m ? ((+m[1] * 60 + +m[2]) * 60 + +m[3]) * 1000 + +m[4] : 0; };
+        const evx = { ml: parseInt(parts[evFmt.indexOf('marginl')], 10) || 0, mr: parseInt(parts[evFmt.indexOf('marginr')], 10) || 0, mv: parseInt(parts[evFmt.indexOf('marginv')], 10) || 0 };
+        if (!/\\p[1-9]/.test(text) && /^\s*m\s+-?[\d.]+\s+-?[\d.]+\s+[lbcs]\s/i.test(text.replace(/\{[^}]*\}/g, ""))) continue;   // drawing leaked into plain text
+        let ci = null;
+        try { ci = assCueInfo(text, st, evx, [resX || 384, resY || 288], Math.max(1, toMs(end) - toMs(start)), /Script generated by FFmpeg/.test(raw)); } catch (_) { ci = null; }
+        if (ci) {
+          const b64 = Buffer.from(JSON.stringify(ci.info)).toString('base64url');
+          cues.push({ start, end, text: '<ass:' + b64 + '>' + (ci.plain || '\u200b') });
+          continue;
         }
-        cues.push({ start, end, text: marker ? marker + clean : (top ? '<position:top>' : '') + clean });
+        if (!clean || /^m\s+-?[\d.]+\s+-?[\d.]+\s+[lbcs]\s/i.test(clean)) continue;   // a drawing that leaked into plain text
+        cues.push({ start, end, text: (top ? '<position:top>' : '') + clean });
       }
     }
   }
 
   cues.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  // outline + fill layers of the same line (converted ASS) show as one: keep the last layer
+  const lastOf = new Map();
+  cues.forEach((c, i) => { const p = c.text.replace(/^<[a-z]+:[^>]*>/i, ''); if (p.replace(/\s/g, '').length > 3) lastOf.set(`${c.start}|${c.end}|${p}`, i); });
+  const keep = cues.filter((c, i) => { const p = c.text.replace(/^<[a-z]+:[^>]*>/i, ''); return p.replace(/\s/g, '').length <= 3 || lastOf.get(`${c.start}|${c.end}|${p}`) === i; });
+  cues.length = 0; cues.push(...keep);
   return 'WEBVTT\n\n' + cues.map((c) => `${c.start} --> ${c.end}\n${c.text}\n`).join('\n');
+}
+
+/* Read an .srt ourselves (ffmpeg merges cues that start together, which wrecks syllable-by-syllable files)
+   and turn it into ASS text so <font face/size/color>, <b>/<i>/<u> and {\an8} reach the same engine. */
+function srtToAss(raw) {
+  const out = ['[Script Info]', '; Script generated by FFmpeg/Lavc (Astra SRT reader)', 'ScriptType: v4.00+', 'PlayResX: 384', 'PlayResY: 288', '',
+    '[V4+ Styles]', 'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
+    'Style: Default,Arial,16,&Hffffff,&Hffffff,&H0,&H0,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1', '', '[Events]', 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'];
+  const blocks = String(raw).replace(/^\uFEFF/, '').split(/\r?\n\r?\n+/);
+  const T = (h, m, sec, ms) => `${+h}:${m}:${sec}.${String(ms).padEnd(3, '0').slice(0, 2)}`;
+  for (const b of blocks) {
+    const lines = b.split(/\r?\n/);
+    const ti = lines.findIndex((l) => /-->/.test(l));
+    if (ti < 0) continue;
+    const m = /(\d+):(\d\d):(\d\d)[,.](\d+)\s*-->\s*(\d+):(\d\d):(\d\d)[,.](\d+)/.exec(lines[ti]);
+    if (!m) continue;
+    const stack = [{ fn: '', fs: '', c: '' }];
+    const top = () => stack[stack.length - 1];
+    const col = (v) => { const h = /^#?([0-9a-f]{6})$/i.exec(String(v).trim()); return h ? '&H' + h[1].slice(4, 6) + h[1].slice(2, 4) + h[1].slice(0, 2) + '&' : ''; };
+    let text = lines.slice(ti + 1).join('\\N').replace(/<(\/?)(font|b|i|u|s)\b([^>]*)>/gi, (all, close, tag, attrs) => {
+      tag = tag.toLowerCase();
+      if (tag !== 'font') return `{\\${tag}${close ? 0 : 1}}`;
+      if (close) { if (stack.length > 1) stack.pop(); const t = top(); return `{\\fn${t.fn}}{\\fs${t.fs}}{\\c${t.c}}`; }
+      const n = { ...top() }; let o = '';
+      const face = /face\s*=\s*["']?([^"'>]+?)["']?(?=\s+\w+=|\s*$)/i.exec(attrs), size = /size\s*=\s*["']?(\d+)/i.exec(attrs), color = /color\s*=\s*["']?(#?[0-9a-f]{6})/i.exec(attrs);
+      if (face) { n.fn = face[1].trim(); o += `{\\fn${n.fn}}`; }
+      if (size) { n.fs = size[1]; o += `{\\fs${n.fs}}`; }
+      if (color && col(color[1])) { n.c = col(color[1]); o += `{\\c${n.c}}`; }
+      stack.push(n); return o;
+    }).replace(/<[^>]+>/g, '');
+    out.push(`Dialogue: 0,${T(m[1], m[2], m[3], m[4])},${T(m[5], m[6], m[7], m[8])},Default,,0,0,0,,${text}`);
+  }
+  return out.join('\n');
 }
 
 // Prefer the ASS route (keeps positioning); fall back to ffmpeg's plain WebVTT conversion.
@@ -524,7 +729,7 @@ const subInFlight = new Map();
 
 function subCacheFile(r, trackIndex) {
   const key = crypto.createHash('sha1')
-    .update(`${r.path}|${r.stat.size}|${r.stat.mtimeMs}|${trackIndex}`)
+    .update(`${r.path}|${r.stat.size}|${r.stat.mtimeMs}|${trackIndex}|a117`)
     .digest('hex');
   return path.join(SUBTITLES_DIR, `${key}.vtt`);
 }
@@ -613,6 +818,13 @@ app.get('/api/subs/file', (req, res) => {
       if (err) return res.status(500).send('Cannot read subtitle');
       sendVtt(res, cleanAndDedupeVTT(data));
     });
+  }
+
+  if (path.extname(r.path).toLowerCase() === '.srt') {
+    try {
+      const vtt = assToVtt(srtToAss(fs.readFileSync(r.path, 'utf-8')));
+      if (vtt.includes('-->')) return sendVtt(res, vtt);
+    } catch (e) { log('ERROR', `SRT reader failed, using ffmpeg: ${e.message}`); }
   }
 
   extractSubtitleVtt(['-i', r.path], (err, raw) => {
@@ -739,11 +951,11 @@ const QUALITY = {
 function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, hw, legacy }) {
   const q = QUALITY[quality] || QUALITY.balanced;
   // The decoder is the main cost for HEVC: give it real threads, keep some CPU for the encoder.
-  const decodeThreads = Math.max(2, Math.min(4, numCoresEarly));
+  const cores = Math.max(1, numCoresEarly);
   // legacy = plain, conservative input flags (the original behaviour) used as a retry if the fast-start flags fail.
   const a = legacy
     ? ['-v', 'error', '-nostdin']
-    : ['-v', 'error', '-nostdin', '-threads', '2'];   // identical to the v1.3 decoder setup
+    : ['-v', 'error', '-nostdin', '-fflags', '+nobuffer+genpts', '-probesize', '2000000', '-analyzeduration', '1000000', '-threads', String(Math.min(8, cores))];   // decoder: all cores
   a.push('-progress', 'pipe:3', '-nostats');          // live speed= readout (used by the Auto resolution mode)
   if (transcodeVideo && q.skipLoop) a.push('-skip_loop_filter', 'all');   // cheaper HEVC decode at the lowest level
   if (seekSec > 0) a.push('-ss', seekSec.toString());
@@ -754,16 +966,18 @@ function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, h
     if (hw) {
       a.push('-vf', `${scale},format=nv12`, '-c:v', hw, '-b:v', q.hwBitrate, '-g', '30');
     } else {
+      // Speed first: frame-threaded x264 on every core (zerolatency forced slow slice threads), no lookahead/B-frames, full source frame rate.
       a.push('-vf', scale, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', q.preset,
-        '-tune', 'zerolatency', '-crf', String(q.crf), '-g', '30');
+        '-threads', String(Math.min(16, cores)), '-x264-params', 'rc-lookahead=0:sync-lookahead=0:bframes=0:scenecut=0:ref=1:weightp=0:no-deblock=0:cabac=0',
+        '-crf', String(q.crf), '-g', '60', '-keyint_min', '30');
     }
   } else {
     a.push('-c:v', 'copy', '-avoid_negative_ts', 'make_zero');
   }
 
   a.push('-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100',
-    '-max_muxing_queue_size', '1024',
-    '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-');
+    '-max_muxing_queue_size', '1024', '-flush_packets', '1', '-muxdelay', '0', '-muxpreload', '0',
+    '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets', '-');
   return a;
 }
 
@@ -784,6 +998,7 @@ app.get('/stream/transcode', (req, res) => {
   const hwWanted = transcodeVideo && !!HW_ENCODER && req.query.enc === 'hw';
 
   markInteractive(20000);
+  try { req.socket.setNoDelay(true); } catch (e) {}
   killTranscode();
   const jobId = ++transcodeJobId;
   activeTranscodeFile = req.query.file ? String(req.query.file) : '';
@@ -988,13 +1203,21 @@ function vttToSrt(vtt) {
 }
 const AI_EXPORT_DIR = path.join(AI_DIR, '..', 'export');
 function aiExport(job, vtt) {
+  const base = niceSubName(job.relPath, job.mode);
   try {
     fs.mkdirSync(AI_EXPORT_DIR, { recursive: true });
-    const name = niceSubName(job.relPath, job.mode);
+    // never overwrite a different subtitle of the same episode: another language / model / translation gets its own name
+    const taken = (n) => Object.keys(aiIndex).some((k) => k !== job.key && aiIndex[k] && aiIndex[k].name === n) && fs.existsSync(path.join(AI_EXPORT_DIR, `${n}.srt`));
+    let name = base;
+    if (taken(name)) {
+      const tag = job.translate ? 'translated' : (job.langUsed || (job.lang && job.lang !== 'auto' ? job.lang : '') || 'auto');
+      name = `${base} (${tag})`;
+      for (let n = 2; taken(name) && n < 50; n++) name = `${base} (${tag} ${n})`;
+    }
     fs.writeFileSync(path.join(AI_EXPORT_DIR, `${name}.vtt`), vtt, 'utf-8');
     fs.writeFileSync(path.join(AI_EXPORT_DIR, `${name}.srt`), vttToSrt(vtt), 'utf-8');
     return name;
-  } catch (e) { return niceSubName(job.relPath, job.mode); }
+  } catch (e) { return base; }
 }
 const LANG3 = { jpn: 'ja', eng: 'en', hin: 'hi', kor: 'ko', zho: 'zh', chi: 'zh', spa: 'es', fra: 'fr', fre: 'fr', deu: 'de', ger: 'de', rus: 'ru', ara: 'ar', ita: 'it', por: 'pt', tha: 'th', ind: 'id', tam: 'ta', tel: 'te' };
 /* The audio track usually says what language it is: then whisper does not waste time detecting it. */
@@ -1132,7 +1355,7 @@ function collapseRepeats(text) {
       if (!base.trim()) continue;
       let reps = 1;
       while (i + (reps + 1) * n <= w.length && w.slice(i + reps * n, i + (reps + 1) * n).map(normTok).join(' ') === base) reps++;
-      if (reps >= (n >= 3 ? 2 : 3)) w.splice(i + n, (reps - 1) * n);                                       // "still still still" / "a film of a film of ..." -> once
+      if (reps >= (n === 1 ? 5 : 3)) w.splice(i + n, (reps - 1) * n);      // 'No, no, no!' stays; 'you, you, you, ...' and phrase loops go                                       // "still still still" / "a film of a film of ..." -> once
     }
   }
   return w.join(' ').replace(/\s+([,.!?])/g, '$1').trim();
@@ -1157,14 +1380,14 @@ function cleanCues(cues) {
     const s = c.s, maxOf = (t) => Math.min(8, 1.8 + t.length * 0.09);   // a 20-character line is not on screen for 40 s
     const e = Math.min(Math.max(c.e, s + 0.4), s + maxOf(text));
     const words = nt.split(' ').length;
-    // same (or near-same) line as one of the last three: a decoding loop or a chunk-edge duplicate -> keep one
-    let dup = null;
+    // a decoding loop / chunk-edge duplicate: touching or overlapping repeat of the same line, or the 3rd+ identical line within 10 s
+    let dup = null, same = 0;
     for (let k = out.length - 1; k >= 0 && k >= out.length - 3 && !dup; k--) {
       const q = out[k], gap = s - (q.raw || q.e);
       if (gap > 10) break;
       const qn = normTxt(q.text);
-      if (qn === nt && (text.length >= 12 || gap < 1.5)) dup = q;
-      else if (text.length >= 12 && words >= 3 && gap < 6 && similar(q.text, text)) dup = q;
+      if (qn === nt) { same++; if (gap < 1.5 || same >= 2) dup = q; }
+      else if (text.length >= 12 && words >= 3 && gap < 0.5 && similar(q.text, text)) dup = q;
     }
     if (dup) {
       if (nt.length > normTxt(dup.text).length && s < dup.e + 0.5) dup.text = text;
@@ -1176,6 +1399,14 @@ function cleanCues(cues) {
     if (p && s < p.e) p.e = Math.max(p.s + 0.3, s);                    // never overlap the previous line
     out.push({ s, e, text, raw: c.e });
   });
+  // a whole run of lines repeated straight after itself (A B C D A B C D) is a loop too: keep the first copy
+  for (let m = 8; m >= 2; m--) {
+    for (let i = m; i + m <= out.length; ) {
+      let same = true;
+      for (let k = 0; k < m && same; k++) same = normTxt(out[i - m + k].text) === normTxt(out[i + k].text);
+      if (same) out.splice(i, m); else i++;
+    }
+  }
   return out.map((c) => ({ s: c.s, e: c.e, text: c.text }));
 }
 
@@ -1227,6 +1458,7 @@ function buildGated(wavFile, outFile, segs, total) {
   wavWrite(outFile, Buffer.concat(parts), rate);
   return {
     seconds: cs,
+    segs,
     map(t, edge) {
       for (const m of map) if (t >= m.cs && t <= m.ce) return m.os + (t - m.cs);
       for (let i = 0; i < map.length; i++) {                      // inside a gap: start snaps forward, end snaps back
@@ -1235,6 +1467,27 @@ function buildGated(wavFile, outFile, segs, total) {
       const l = map[map.length - 1]; return l.os + (l.ce - l.cs);
     },
   };
+}
+/* Whisper's own times drift a little either way. The silence scan knows where speech really starts and stops,
+   so a line that opens/closes next to a speech edge is moved onto that edge. */
+function snapToSpeech(cues, segs, ss) {
+  const EDGE = 0.2, TOL = 1.5, out = cues.map((c) => ({ ...c }));
+  const inner = segs.map(([a0, b0]) => [a0 + ss + EDGE, b0 + ss - EDGE]).filter(([a, b]) => b - a >= 0.3);
+  const inside = (t, k) => inner.some(([a, b], j) => j !== k && t > a + 0.15 && t < b - 0.15);      // t lies in the middle of ANOTHER speech stretch
+  inner.forEach(([a, b], k) => {
+    let first = null, last = null;
+    out.forEach((c) => {
+      if (c.s >= a - TOL && c.s <= b && !inside(c.s, k) && (!first || c.s < first.s)) first = c;
+      if (c.e >= a && c.e <= b + TOL && !inside(c.e, k) && (!last || c.e > last.e)) last = c;
+    });
+    if (first && Math.abs(first.s - a) <= TOL) first.s = Math.max(0, a);
+    if (last && Math.abs(last.e - b) <= TOL && b - last.s >= 0.4) last.e = b;
+  });
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].e < out[i].s + 0.4) out[i].e = out[i].s + 0.4;
+    if (out[i + 1] && out[i].e > out[i + 1].s) out[i].e = Math.max(out[i].s + 0.3, out[i + 1].s);
+  }
+  return out;
 }
 function aiSilences(file) {
   return new Promise((resolve) => {
@@ -1266,7 +1519,7 @@ function aiSpawnWait(job, cmd, args, tailRef) {
     const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     job.proc = p; (job.procs = job.procs || new Set()).add(p); p.on('close', () => job.procs.delete(p));
     try { os.setPriority(p.pid, 0); } catch (e) {}
-    const grab = (c) => { tailRef.t = (tailRef.t + c.toString()).slice(-600); };
+    const grab = (c) => { tailRef.t = (tailRef.t + c.toString()).slice(-(tailRef.max || 600)); };
     p.stdout.on('data', grab); p.stderr.on('data', grab);
     p.on('error', (e) => resolve({ code: -1, signal: null, err: e.message }));
     p.on('close', (code, signal) => resolve({ code, signal }));
@@ -1298,7 +1551,7 @@ async function aiRun(job) {
       const ex = await aiSpawnWait(job, 'ffmpeg', ['-v', 'error', '-nostdin', '-y', '-ss', String(Math.floor(job.duration * 0.3)), '-i', job.path, '-map', job.audioTrack, '-t', '30', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', lw], { t: '' });
       if (ex.code === 0) {
         const tail = { t: '' };
-        await aiSpawnWait(job, bin, ['-m', modelPath, '-f', lw, '-dl', '-t', '2'], tail);
+        tail.max = 6000; await aiSpawnWait(job, bin, ['-m', modelPath, '-f', lw, '-dl', '-t', '2'], tail);
         const m = /auto-detected language:\s*([a-z]{2,3})/i.exec(tail.t);
         if (m) job.langUsed = m[1].toLowerCase();
       }
@@ -1456,6 +1709,10 @@ async function aiRun(job) {
         }
         cues = res.cues.filter((c) => c.s >= start - 0.01 && (i === list.length - 1 || c.s < start + len));    // each chunk owns the cues that START inside it
         cues = cleanCues(cues);
+        if (job.translate || ['en', 'es', 'fr', 'de', 'it', 'pt', 'id'].includes(job.langUsed)) {             // wrong-script junk ("\ufffd", Hangul in English audio)
+          cues = cues.map((c) => ({ ...c, text: c.text.replace(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\ufffd]+/g, '').replace(/\s{2,}/g, ' ').trim() })).filter((c) => /[\p{L}\p{N}]/u.test(c.text));
+        }
+        if (gate && !(savedConfig.whisper && savedConfig.whisper.snap === false)) cues = snapToSpeech(cues, gate.segs, ss);
       }
       try { fs.unlinkSync(wav); } catch (e) {}
       try { fs.unlinkSync(path.join(job.workDir, `${i}.gate.wav`)); } catch (e) {}
@@ -1526,10 +1783,29 @@ app.get('/api/ai/subs', (req, res) => {
   res.json({ key: p.key, state: st, pct: 0, msg: job && st !== 'none' ? job.msg : '', model: p.model, queued: aiQueue.length });
 });
 
+/* Remove one finished subtitle completely (result, readable exports, chunk cache). */
+function aiRemove(key) {
+  if (!/^[0-9a-f]{40}$/.test(key)) return false;
+  const e = aiIndex[key];
+  try { fs.rmSync(aiCacheFile(key), { force: true }); } catch (x) {}
+  try { fs.rmSync(path.join(AI_DIR, key), { recursive: true, force: true }); } catch (x) {}
+  try { fs.rmSync(aiPartFile(key), { force: true }); } catch (x) {}
+  if (e && e.name) ['srt', 'vtt'].forEach((x) => { try { fs.rmSync(path.join(AI_EXPORT_DIR, `${e.name}.${x}`), { force: true }); } catch (y) {} });
+  delete aiIndex[key]; aiIndexSave(); aiJobs.delete(key);
+  return true;
+}
+app.post('/api/ai/subs/remove', (req, res) => {
+  const key = String((req.body && req.body.key) || '');
+  const job = aiJobs.get(key);
+  if (job && ['queued', 'extracting', 'transcribing'].includes(job.state)) return res.status(409).json({ error: 'Still running - stop it first' });
+  res.json({ ok: aiRemove(key) });
+});
+
 app.post('/api/ai/subs', (req, res) => {
   if (!findWhisperBin() || !listWhisperModels().names.length) return res.status(501).json({ error: 'whisper.cpp / model not installed (see README)' });
   const p = aiParams(req.body || {});
   if (p.error) return res.status(p.status).json({ error: p.error });
+  if (req.body && req.body.force && !aiJobs.has(p.key)) aiRemove(p.key);          // "Generate again": throw the old result away first
   if (fs.existsSync(aiCacheFile(p.key))) return res.json({ key: p.key, state: 'done', pct: 100 });
   const existing = aiJobs.get(p.key);
   if (existing && ['queued', 'extracting', 'transcribing'].includes(existing.state)) {
@@ -1682,11 +1958,12 @@ app.get('/stream', (req, res) => {
   markInteractive(8000);
   const fileSize = r.stat.size;
   const contentType = CONTENT_TYPES[path.extname(r.path).toLowerCase()] || 'video/mp4';
-  const CHUNK_SIZE = 1024 * 1024 * 4;
+  const CHUNK_SIZE = 1024 * 1024 * 8;
+  try { req.socket.setNoDelay(true); req.socket.setKeepAlive(true, 30000); } catch (e) {}
   const range = req.headers.range;
 
   const pipeFile = (opts) => {
-    const stream = fs.createReadStream(r.path, opts);
+    const stream = fs.createReadStream(r.path, { ...opts, highWaterMark: 1024 * 1024 });   // 1 MB reads: far fewer syscalls than the 64 KB default
     stream.on('error', () => res.destroy());
     res.on('close', () => stream.destroy());
     stream.pipe(res);
@@ -1718,7 +1995,9 @@ app.get('/stream', (req, res) => {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': end - start + 1,
-      'Content-Type': contentType
+      'Content-Type': contentType,
+      'Cache-Control': 'private, max-age=3600',
+      'Last-Modified': new Date(r.stat.mtimeMs).toUTCString()
     });
     pipeFile({ start, end });
   } else {

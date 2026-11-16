@@ -41,6 +41,7 @@ function syncMerge(keys) {
   return changed;
 }
 window.addEventListener('pagehide', () => { if (Object.keys(syncPending).length) syncPush(); });
+window.syncFlush = () => { if (Object.keys(syncPending).length) syncPush(); };
 (function syncStart() {                       // blocking on purpose: settings must be in place before the page reads them
   try {
     const x = new XMLHttpRequest(); x.open('GET', '/api/profile', false); x.send();
@@ -125,7 +126,7 @@ let activeVideoPath = '';
 let historyCache = {};
 let currentExplicitDuration = 0;
 let lastRecordedTime = 0;
-let currentBrowsingDir = '/sdcard';
+let currentBrowsingDir = '';
 let currentParentDir = '';
 let activeAudioStreamIndex = '0:a:0';
 let isTranscodingMode = false;
@@ -144,7 +145,7 @@ let sessionRestoreDone = false;
 let subsOn = false;
 let subDelay = 0;          // seconds; + = subtitles appear later
 let playbackSpeed = 1;
-const PREF_DEFAULTS = { v: 4, seekStep: 10, quality: 'auto', preBuffer: 0, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
+const PREF_DEFAULTS = { v: 4, seekStep: 10, quality: 'auto', preBuffer: 0, preBufMB8: 0, preBufMB10: 0, autoPlay: true, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
 const prefs = Object.assign({}, PREF_DEFAULTS);
 try {
   const saved = JSON.parse(localStorage.getItem('astra_prefs') || '{}');
@@ -162,7 +163,24 @@ const AUTO_LEVELS = ['balanced', 'fast', 'low'];
 let autoLevel = 0;
 function effectiveQuality() { return qualityOverride || (prefs.quality === 'auto' ? AUTO_LEVELS[autoLevel] : prefs.quality); }
 // 10-bit HEVC is re-encoded live: always keep a 5 s head start so playback does not stutter right away.
-function needBuf() { return isTranscodingMode && isCurrentFile10Bit ? Math.max(5, prefs.preBuffer) : prefs.preBuffer; }
+// Pre-buffer is set in memory (MB); the player turns it into seconds using this video's own data rate.
+let currentFileBytes = 0;
+const TC_BYTES_PER_SEC = { low: 90e3, fast: 150e3, balanced: 250e3, quality: 500e3 };
+function estBytesPerSec() {
+  const tc = isTranscodingMode && isCurrentFile10Bit;
+  if (tc) return TC_BYTES_PER_SEC[effectiveQuality()] || 250e3;
+  const d = getDuration && getDuration();
+  return currentFileBytes > 0 && d > 0 ? currentFileBytes / d : 450e3;            // typical 720p anime when no file is open
+}
+function bufSeconds(mb, tc) {
+  const bps = tc ? (TC_BYTES_PER_SEC[effectiveQuality()] || 250e3) : estBytesPerSec();
+  return mb > 0 ? Math.min(600, (mb * 1048576) / bps) : 0;
+}
+function needBuf() {
+  const tc = isTranscodingMode && isCurrentFile10Bit;
+  const sec = bufSeconds(tc ? prefs.preBufMB10 : prefs.preBufMB8, tc);
+  return tc ? Math.max(5, sec) : sec;
+}
 let startWatch = null;
 let sleepTimerId = null;
 let sleepAtEnd = false;
@@ -286,8 +304,10 @@ function resumeAudio() {
   document.addEventListener(evt, resumeAudio, { passive: true });
 });
 
-function initWebAudio() {
+// The Web Audio chain (delay + EQ) costs CPU on every audio frame, so it is only built when it is really used.
+function initWebAudio(force) {
   if (audioCtx) { resumeAudio(); return; }
+  if (!force && !currentAudioOffset && !eqBassDb && !eqTrebleDb) return;
   try {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     audioSrcNode = audioCtx.createMediaElementSource(video);
@@ -316,7 +336,7 @@ function initWebAudio() {
 const rngAudioOffset = $('rngAudioOffset');
 if (rngAudioOffset) {
   rngAudioOffset.addEventListener('input', (e) => {
-    initWebAudio();
+    initWebAudio(true);
     currentAudioOffset = parseFloat(e.target.value);
     $('lblAudioOffset').textContent = `${currentAudioOffset > 0 ? '+' : ''}${currentAudioOffset.toFixed(2)}s`;
     if (delayNode) {
@@ -351,7 +371,7 @@ function applyEq(bass, treble, preset) {
 [eqBassSlider, eqTrebleSlider].forEach((slider) => {
   if (!slider) return;
   slider.addEventListener('input', () => {
-    initWebAudio();
+    initWebAudio(true);
     applyEq(eqBassSlider.value, eqTrebleSlider.value, '');
     saveCurrentSettings();
   });
@@ -360,7 +380,7 @@ function applyEq(bass, treble, preset) {
 document.querySelectorAll('[data-eq]').forEach((btn) => {
   btn.onclick = () => {
     const preset = EQ_PRESETS[btn.dataset.eq] || EQ_PRESETS.flat;
-    initWebAudio();
+    initWebAudio(true);
     applyEq(preset[0], preset[1], btn.dataset.eq);
     saveCurrentSettings();
   };
@@ -465,6 +485,11 @@ function loadSavedSettings() {
     if (saved.subBg !== undefined) $('chkSubBg').checked = saved.subBg;
     if (saved.subTextColor) $('colSubText').value = saved.subTextColor;
     if (saved.subBorderColor) $('colSubBorder').value = saved.subBorderColor;
+    if (saved.subFont !== undefined) $('selSubFont').value = saved.subFont;
+    if (saved.subOutline !== undefined) $('rngSubOutline').value = saved.subOutline;
+    if (saved.subBgOp !== undefined) $('rngSubBgOp').value = saved.subBgOp;
+    if (saved.subBgCol) $('colSubBgCol').value = saved.subBgCol;
+    if (saved.subPos !== undefined) $('rngSubPos').value = saved.subPos;
 
     if (saved.sharpness !== undefined) {
       $('sharpStrength').value = saved.sharpness;
@@ -523,6 +548,11 @@ function saveCurrentSettings() {
     subBg: $('chkSubBg').checked,
     subTextColor: $('colSubText').value,
     subBorderColor: $('colSubBorder').value,
+    subFont: $('selSubFont').value,
+    subOutline: $('rngSubOutline').value,
+    subBgOp: $('rngSubBgOp').value,
+    subBgCol: $('colSubBgCol').value,
+    subPos: $('rngSubPos').value,
     sharpness: $('sharpStrength').value,
     bright: $('rngBright').value,
     contrast: $('rngContrast').value,
@@ -557,44 +587,69 @@ document.querySelectorAll('[data-deflang]').forEach((btn) => {
 /* ------------------------------------------------------------------ */
 /* Subtitles                                                           */
 /* ------------------------------------------------------------------ */
+const SUB_FONTS = {
+  '': '', sans: '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif', serif: 'Georgia, "Times New Roman", serif', mono: '"Courier New", ui-monospace, monospace',
+  round: 'ui-rounded, "Varela Round", "Nunito", "Trebuchet MS", sans-serif', comic: '"Comic Sans MS", "Comic Neue", cursive', impact: 'Impact, "Arial Black", sans-serif', hand: '"Segoe Print", "Bradley Hand", cursive'
+};
 function updateSubtitleStyles() {
   const size = $('rngSubSize').value;
   const scale = $('rngSubScale').value;
   const isBold = $('chkSubBold').checked;
   const hasShadow = $('chkSubShadow').checked;
   const hasBorder = $('chkSubBorder').checked;
-  const hasBg = $('chkSubBg').checked;
+  const outline = parseFloat($('rngSubOutline').value) || 0;
+  const bgOp = parseInt($('rngSubBgOp').value, 10) || 0;
   const textColor = $('colSubText').value;
   const borderColor = $('colSubBorder').value;
+  const bgHex = $('colSubBgCol').value || '#000000';
+  const rgb = [1, 3, 5].map((i) => parseInt(bgHex.slice(i, i + 2), 16));
 
   $('lblSubSize').textContent = `${size}px`;
   $('lblSubScale').textContent = `${scale}%`;
+  $('lblSubOutline').textContent = outline ? `${outline}px` : 'Off';
+  $('lblSubBgOp').textContent = bgOp ? `${bgOp}%` : 'Off';
+  $('lblSubPos').textContent = `${$('rngSubPos').value}%`;
 
   subDisplayBox.style.fontSize = `${size}px`;
+  subDisplayBox.style.fontFamily = SUB_FONTS[$('selSubFont').value] || '';
   subDisplayBox.style.transform = `scale(${scale / 100})`;
   subDisplayBox.style.fontWeight = isBold ? '700' : '400';
   subDisplayBox.style.color = textColor;
-  subDisplayBox.style.backgroundColor = hasBg ? 'rgba(0, 0, 0, 0.65)' : 'transparent';
-  subDisplayBox.style.padding = hasBg ? '4px 8px' : '0px';
-  subDisplayBox.style.borderRadius = hasBg ? '4px' : '0px';
-
-  const shadows = [];
-  if (hasBorder) {
-    shadows.push(`-1px -1px 0 ${borderColor}`, `1px -1px 0 ${borderColor}`, `-1px 1px 0 ${borderColor}`, `1px 1px 0 ${borderColor}`);
-  }
-  if (hasShadow) {
-    shadows.push('2px 2px 4px rgba(0,0,0,0.9)', '0 0 8px rgba(0,0,0,0.8)');
-  }
-  subDisplayBox.style.textShadow = shadows.length > 0 ? shadows.join(', ') : 'none';
+  subDisplayBox.style.backgroundColor = bgOp ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${bgOp / 100})` : 'transparent';
+  subDisplayBox.style.padding = bgOp ? '4px 10px' : '0px';
+  subDisplayBox.style.borderRadius = bgOp ? '6px' : '0px';
+  // border = real stroke behind the letters (any size), shadow stays a soft drop shadow
+  subDisplayBox.style.webkitTextStroke = hasBorder && outline ? `${outline * 2}px ${borderColor}` : '0';
+  subDisplayBox.style.paintOrder = 'stroke fill';
+  subDisplayBox.style.textShadow = hasShadow ? '2px 2px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.8)' : 'none';
   if (typeof syncTopBoxStyle === 'function') syncTopBoxStyle();
+  if (typeof syncSubLift === 'function') syncSubLift();
   saveCurrentSettings();
 }
 
-['rngSubSize', 'rngSubScale', 'chkSubBold', 'chkSubShadow', 'chkSubBorder', 'chkSubBg', 'colSubText', 'colSubBorder'].forEach((id) => {
+['rngSubSize', 'rngSubScale', 'rngSubOutline', 'rngSubBgOp', 'rngSubPos', 'selSubFont', 'chkSubBold', 'chkSubShadow', 'chkSubBorder', 'chkSubBg', 'colSubText', 'colSubBorder', 'colSubBgCol'].forEach((id) => {
   const el = $(id);
   if (el) el.addEventListener('input', updateSubtitleStyles);
 });
+$('btnSubStyleReset').onclick = () => {
+  const d = { rngSubSize: 18, rngSubScale: 100, rngSubOutline: 1.5, rngSubBgOp: 0, rngSubPos: 0 };
+  Object.entries(d).forEach(([k, v]) => { $(k).value = v; });
+  $('selSubFont').value = ''; $('chkSubBold').checked = true; $('chkSubShadow').checked = true; $('chkSubBorder').checked = true;
+  $('colSubText').value = '#ffffff'; $('colSubBorder').value = '#000000'; $('colSubBgCol').value = '#000000';
+  updateSubtitleStyles();
+};
 
+// Where the bottom subtitle sits: user height + automatically above the control bar while it is visible.
+function syncSubLift() {
+  const pos = parseFloat($('rngSubPos').value) || 0;
+  const wrap = $('playerWrapper');
+  const h = wrap ? wrap.clientHeight : 0;
+  const bar = $('bottomOverlay');
+  const barUp = bar && !bar.classList.contains('hidden') && !wrap.classList.contains('is-locked') ? Math.max(0, bar.offsetHeight - 22) : 0;
+  const px = Math.round(34 + (h * pos) / 100 + barUp);
+  subDisplayBox.style.top = 'auto';
+  subDisplayBox.style.bottom = `${px}px`;
+}
 // Cue text -> safe HTML. Only <i>, <b>, <u> survive; everything else is stripped/escaped.
 function formatCueText(raw) {
   const noTags = raw.replace(/<(?!\/?[ibu]>)[^>]*>/gi, '');
@@ -617,7 +672,7 @@ const subTopBox = subDisplayBox.cloneNode(false);
 subTopBox.id = 'subTopBox';
 subDisplayBox.parentNode.insertBefore(subTopBox, subDisplayBox);
 function syncTopBoxStyle() {
-  ['fontSize', 'transform', 'fontWeight', 'color', 'backgroundColor', 'padding', 'borderRadius', 'textShadow'].forEach((k) => { subTopBox.style[k] = subDisplayBox.style[k]; });
+  ['fontSize', 'fontFamily', 'transform', 'fontWeight', 'color', 'backgroundColor', 'padding', 'borderRadius', 'textShadow', 'webkitTextStroke', 'paintOrder'].forEach((k) => { subTopBox.style[k] = subDisplayBox.style[k]; });
 }
 syncTopBoxStyle();
 
@@ -628,6 +683,7 @@ function hideSubtitle() {
   subTopBox.style.display = 'none';
   subTopBox.innerHTML = '';
   subPosLayer.textContent = '';
+  assAnims.length = 0;
 }
 
 let activeSubSignature = '';
@@ -644,6 +700,177 @@ function pictureRect() {
   return { x: (W - w) / 2, y: (H - h) / 2, w, h };
 }
 
+/* ---- ASS engine renderer (v1.17): draws <ass:…> cues with positions, 9-grid anchors, fades, moves,
+   \t transforms, karaoke and vector drawings (SVG), animated with the Web Animations API. ---- */
+const ASS_RE = /^<ass:([A-Za-z0-9_-]+)>/;
+const assAnims = [];                       // { a: Animation, cue }
+function assDecode(raw) {
+  const m = ASS_RE.exec(raw);
+  if (!m) return null;
+  try {
+    const b = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(escape(atob(b + '==='.slice((b.length + 3) % 4))));
+    return { info: JSON.parse(json), plain: raw.slice(m[0].length) };
+  } catch (_) { return null; }
+}
+function assTimeline(info, key, start) {   // numeric \t timeline for one property: [[ms,value],...]
+  const pts = [[0, start]]; let v = start;
+  (info.tf || []).filter((t) => t.p[key] != null).sort((a, b) => a.t1 - b.t1).forEach((t) => {
+    pts.push([t.t1, v]); pts.push([t.t2, t.p[key]]); v = t.p[key];
+  });
+  return pts.length > 1 ? pts : null;
+}
+function assAt(pts, ms) {
+  if (ms <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) {
+    if (ms <= pts[i][0]) { const [t0, v0] = pts[i - 1], [t1, v1] = pts[i]; return t1 === t0 ? v1 : v0 + (v1 - v0) * (ms - t0) / (t1 - t0); }
+  }
+  return pts[pts.length - 1][1];
+}
+function renderAss(info, cue, rect, layer) {
+  const [rx, ry] = info.r, kx = rect.w / rx, ky = rect.h / ry, b = info.base;
+  const dur = Math.max(1, (cue.endTime - cue.startTime) * 1000);
+  const an = info.an, colA = an % 3 === 1 ? 0 : an % 3 === 2 ? 1 : 2, rowA = an >= 7 ? 0 : an >= 4 ? 1 : 2;
+  let ax, ay, maxW;
+  if (info.pos) { ax = info.pos[0]; ay = info.pos[1]; maxW = rect.w; }
+  else if (info.mv) { ax = info.mv[0]; ay = info.mv[1]; maxW = rect.w; }
+  else {
+    const [ml, mr, mv] = info.mr;
+    ax = colA === 0 ? ml : colA === 1 ? (rx + ml - mr) / 2 : rx - mr;
+    ay = rowA === 0 ? mv : rowA === 1 ? ry / 2 : ry - mv;
+    maxW = Math.max(40, (rx - ml - mr) * kx);
+  }
+  const outer = document.createElement('div');
+  outer.className = 'sub-ass';
+  outer.style.left = `${rect.x + ax * kx}px`; outer.style.top = `${rect.y + ay * ky}px`;
+  const fade = document.createElement('div'); fade.className = 'sub-ass-l';
+  const rot = document.createElement('div'); rot.className = 'sub-ass-l';
+  const box = document.createElement('div'); box.className = 'sub-ass-box';
+  outer.appendChild(fade); fade.appendChild(rot); rot.appendChild(box);
+  const px = (v) => `${v * ky}px`;
+  const anims = [];
+  const anim = (el, frames) => { try { const a = el.animate(frames, { duration: dur, fill: 'both', easing: 'linear' }); a.pause(); anims.push(a); } catch (_) { /* old browser: static */ } };
+
+  box.style.transform = `translate(${-colA * 50}%, ${-rowA * 50}%)`;
+  box.style.textAlign = colA === 0 ? 'left' : colA === 1 ? 'center' : 'right';
+  box.style.maxWidth = `${maxW}px`;
+  box.style.fontFamily = b.fn ? `"${b.fn}", "Noto Sans", Arial, sans-serif` : 'Arial, "Noto Sans", sans-serif';
+  box.style.fontSize = px(b.fs || 48);
+  box.style.color = `#${b.c1}`;
+  if (b.b) box.style.fontWeight = '700';
+  if (b.i) box.style.fontStyle = 'italic';
+  box.style.textDecoration = [b.u ? 'underline' : '', b.s ? 'line-through' : ''].join(' ').trim() || 'none';
+  const outline = `#${b.c3}`;
+  if (info.box) { box.style.background = outline; box.style.padding = px(b.bord || 2); }
+  else if (b.bord > 0) { box.style.webkitTextStroke = `${2 * b.bord * ky}px ${outline}`; box.style.paintOrder = 'stroke fill'; }
+  if (b.shad > 0) box.style.textShadow = `${px(b.shad)} ${px(b.shad)} 0 rgba(0,0,0,.55)`;
+  if (b.blur > 0 || (info.tf || []).some((t) => t.p.blur != null)) box.style.filter = `blur(${b.blur * ky * 0.6}px)`;
+  if (b.a < 1) rot.style.opacity = String(b.a);
+
+  // transform group on the rotation layer (origin = the anchor point)
+  const frz = assTimeline(info, 'frz', b.frz), sx = assTimeline(info, 'sx', b.sx), sy = assTimeline(info, 'sy', b.sy);
+  const tfm = (ms) => `rotate(${-(frz ? assAt(frz, ms) : b.frz)}deg) scale(${(sx ? assAt(sx, ms) : b.sx) / 100}, ${(sy ? assAt(sy, ms) : b.sy) / 100})`;
+  rot.style.transformOrigin = '0 0';
+  rot.style.transform = tfm(0);
+  if (frz || sx || sy) {
+    const ms = [...new Set([0, dur, ...[frz, sx, sy].filter(Boolean).flatMap((p) => p.map((q) => q[0]))])].filter((x) => x >= 0 && x <= dur).sort((a, c) => a - c);
+    anim(rot, ms.map((t) => ({ offset: t / dur, transform: tfm(t) })));
+  }
+  const fs = assTimeline(info, 'fs', b.fs || 48);
+  if (fs) anim(box, fs.map(([t, v]) => ({ offset: Math.min(1, t / dur), fontSize: px(v) })));
+  const al = assTimeline(info, 'a', b.a);
+  if (al) anim(rot, al.map(([t, v]) => ({ offset: Math.min(1, t / dur), opacity: v })));
+  const bl = assTimeline(info, 'blur', b.blur);
+  if (bl) anim(box, bl.map(([t, v]) => ({ offset: Math.min(1, t / dur), filter: `blur(${v * ky * 0.6}px)` })));
+  const bo = assTimeline(info, 'bord', b.bord);
+  if (bo && !info.box) anim(box, bo.map(([t, v]) => ({ offset: Math.min(1, t / dur), webkitTextStrokeWidth: `${2 * v * ky}px` })));
+  const tc = (info.tf || []).filter((t) => t.p.c1).sort((a, c) => a.t1 - c.t1);
+  if (tc.length) {
+    const fr = [{ offset: 0, color: `#${b.c1}` }]; let last = b.c1;
+    tc.forEach((t) => { fr.push({ offset: Math.min(1, t.t1 / dur), color: `#${last}` }, { offset: Math.min(1, t.t2 / dur), color: `#${t.p.c1}` }); last = t.p.c1; });
+    fr.push({ offset: 1, color: `#${last}` });
+    anim(box, fr);
+  }
+  if (info.fd) anim(fade, info.fd.map(([t, v]) => ({ offset: Math.min(1, t / dur), opacity: v })));
+  if (info.mv) {
+    const [x1, y1, x2, y2, t1, t2] = info.mv, L = (x) => `${rect.x + x * kx}px`, T = (y) => `${rect.y + y * ky}px`;
+    anim(outer, [{ offset: 0, left: L(x1), top: T(y1) }, { offset: Math.min(1, t1 / dur), left: L(x1), top: T(y1) },
+      { offset: Math.min(1, Math.max(t1, t2) / dur), left: L(x2), top: T(y2) }, { offset: 1, left: L(x2), top: T(y2) }]);
+  }
+
+  if (info.dr) {
+    const d = info.dr, ns = 'http://www.w3.org/2000/svg', pad = (d.bord || 0) + 1;
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', `${d.x - pad} ${d.y - pad} ${d.w + 2 * pad} ${d.h + 2 * pad}`);
+    svg.style.width = `${(d.w + 2 * pad) * kx}px`; svg.style.height = `${(d.h + 2 * pad) * ky}px`;
+    svg.style.overflow = 'visible'; svg.style.display = 'block';
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', d.d); p.setAttribute('fill', `#${d.c}`);
+    if (d.bord > 0 && !info.box) { p.setAttribute('stroke', `#${d.o}`); p.setAttribute('stroke-width', String(d.bord * 2)); p.setAttribute('paint-order', 'stroke'); p.setAttribute('stroke-linejoin', 'round'); }
+    svg.appendChild(p);
+    box.style.webkitTextStroke = '0'; box.style.width = 'max-content';
+    box.appendChild(svg);
+  } else {
+    (info.runs || []).forEach((r) => {
+      const mk = (txt, extra) => {
+        const sp = document.createElement('span'); sp.textContent = txt;
+        if (r.c1) sp.style.color = `#${r.c1}`;
+        if (r.fs) sp.style.fontSize = px(r.fs);
+        if (r.fn) sp.style.fontFamily = `"${r.fn}", "Noto Sans", Arial, sans-serif`;
+        if (r.b != null) sp.style.fontWeight = r.b ? '700' : '400';
+        if (r.i != null) sp.style.fontStyle = r.i ? 'italic' : 'normal';
+        if (r.u != null || r.s != null) sp.style.textDecoration = [(r.u != null ? r.u : b.u) ? 'underline' : '', (r.s != null ? r.s : b.s) ? 'line-through' : ''].join(' ').trim() || 'none';
+        if (r.bord != null) sp.style.webkitTextStrokeWidth = `${2 * r.bord * ky}px`;
+        if (extra) extra(sp);
+        box.appendChild(sp); return sp;
+      };
+      if (r.k) {
+        const [st, kd, ty] = r.k, after = `#${r.c1 || b.c1}`, before = `#${b.c2 || b.c1}`;
+        const chars = ty === 'f' && r.t.length > 1 ? [...r.t] : [r.t];
+        chars.forEach((ch, i) => mk(ch, (sp) => {
+          const t0 = st + kd * i / chars.length, t1 = t0 + Math.max(1, kd / chars.length);
+          sp.style.color = before;
+          anim(sp, [{ offset: 0, color: before }, { offset: Math.min(1, t0 / dur), color: before }, { offset: Math.min(1, t1 / dur), color: after }, { offset: 1, color: after }]);
+        }));
+      } else mk(r.t);
+    });
+  }
+  layer.appendChild(outer);
+  anims.forEach((a) => assAnims.push({ a, cue }));
+  return outer;
+}
+// keep every animation locked to the video clock (seek, pause, play)
+// An SRT that spells a line out syllable by syllable (one tiny cue each, all on screen together) is one line, not a column.
+function assMergeSyllables(list) {
+  const groups = new Map(), out = [];
+  list.forEach((it) => {
+    const inf = it.info, r = inf.runs || [];
+    const tiny = !inf.pos && !inf.mv && !inf.dr && r.length === 1 && r[0].t.length <= 6 && !/\n/.test(r[0].t);
+    if (!tiny) { out.push(it); return; }
+    const b = inf.base, key = [inf.an, b.c1, b.c3, b.fn, b.fs, b.b, r[0].c1, r[0].fs].join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  });
+  groups.forEach((g) => {
+    if (g.length < 3) { out.push(...g); return; }
+    g.sort((a, b) => a.cue.startTime - b.cue.startTime || a.i - b.i);
+    const first = g[0], merged = { ...first, info: { ...first.info, runs: g.map((x) => ({ ...x.info.runs[0], t: x.info.runs[0].t + '\u200a' })) } };
+    merged.n = g.length; out.push(merged);
+  });
+  return out.sort((a, b) => a.i - b.i);
+}
+function assSyncAnims() {
+  if (!assAnims.length) return;
+  const t = absoluteTime() - subDelay;
+  for (const it of assAnims) {
+    const ms = Math.max(0, (t - it.cue.startTime) * 1000);
+    try {
+      if (Math.abs((it.a.currentTime || 0) - ms) > 120 || video.paused) it.a.currentTime = ms;
+      if (video.paused) { if (it.a.playState === 'running') it.a.pause(); } else if (it.a.playState !== 'running') it.a.play();
+    } catch (_) { /* ignore */ }
+  }
+}
+
 // Cues are matched against the position in the ORIGINAL file, so subtitles stay
 // in sync after a seek in a transcoded stream (where video.currentTime restarts at 0).
 function updateSubtitleDisplay() {
@@ -658,13 +885,17 @@ function updateSubtitleDisplay() {
   let topText = '';
   let bottomText = '';
   const placed = [];
+  const assList = [];
 
   for (let i = 0; i < cues.length; i++) {
     const cue = cues[i];
     if (cue.startTime > t || cue.endTime <= t) continue;
     const raw = cue.text || '';
-    const pm = POS_RE.exec(raw);
-    if (pm) {
+    const am = ASS_RE.test(raw) ? assDecode(raw) : null;
+    const pm = am ? null : POS_RE.exec(raw);
+    if (am) {
+      assList.push({ cue, i, info: am.info });
+    } else if (pm) {
       placed.push({ x: +pm[1], y: +pm[2], an: +pm[3], fs: pm[4] ? +pm[4] : 0, c1: pm[5], c3: pm[6], html: formatCueText(raw.slice(pm[0].length)) });
     } else if (raw.includes('<position:top>')) {
       topText += formatCueText(raw.replace(/<position:top>/g, '')) + '<br>';
@@ -673,11 +904,13 @@ function updateSubtitleDisplay() {
     }
   }
 
-  const rect = placed.length ? pictureRect() : null;
-  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
-  if (signature === activeSubSignature) return;
+  if (assList.length > 2) { const m = assMergeSyllables(assList); assList.length = 0; assList.push(...m); }
+  const rect = (placed.length || assList.length) ? pictureRect() : null;
+  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${assList.map((a) => a.i + ':' + a.cue.startTime + ':' + (a.n || 1)).join(',')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
+  syncSubLift();
+  if (signature === activeSubSignature) { assSyncAnims(); return; }
 
-  if (!topText && !bottomText && !placed.length) {
+  if (!topText && !bottomText && !placed.length && !assList.length) {
     hideSubtitle();
     return;
   }
@@ -686,11 +919,30 @@ function updateSubtitleDisplay() {
   subTopBox.style.bottom = 'auto'; subTopBox.style.top = '8%';
   subTopBox.innerHTML = topText;
   subTopBox.style.display = topText ? 'inline-block' : 'none';
-  subDisplayBox.style.top = 'auto'; subDisplayBox.style.bottom = '52px';
+  syncSubLift();
   subDisplayBox.innerHTML = bottomText;
   subDisplayBox.style.display = bottomText ? 'inline-block' : 'none';
 
   subPosLayer.textContent = '';
+  assAnims.length = 0;
+  assList.forEach((a) => renderAss(a.info, a.cue, rect, subPosLayer));
+  // lines without their own position that land on the same spot are stacked (bottom ones go up, top ones down)
+  const flow = [...subPosLayer.querySelectorAll('.sub-ass')].filter((_, k) => !assList[k].info.pos && !assList[k].info.mv);
+  for (let i = 1; i < flow.length; i++) {
+    for (let pass = 0; pass < 8; pass++) {
+      const r = flow[i].firstChild.firstChild.firstChild.getBoundingClientRect(); let moved = false;
+      for (let j = 0; j < i; j++) {
+        const o = flow[j].firstChild.firstChild.firstChild.getBoundingClientRect();
+        if (r.left < o.right && r.right > o.left && r.top < o.bottom - 1 && r.bottom > o.top + 1) {
+          const info = assList.filter((x) => !x.info.pos && !x.info.mv)[i].info;
+          const dy = info.an < 7 ? -(r.bottom - o.top + 2) : (o.bottom - r.top + 2);
+          flow[i].style.top = `${parseFloat(flow[i].style.top) + dy}px`; moved = true; break;
+        }
+      }
+      if (!moved) break;
+    }
+  }
+  assSyncAnims();
   placed.forEach((p) => {
     const el = document.createElement('span');
     el.className = 'sub-pos';
@@ -706,6 +958,22 @@ function updateSubtitleDisplay() {
     el.style.textShadow = `-1px -1px 0 ${o}, 1px -1px 0 ${o}, -1px 1px 0 ${o}, 1px 1px 0 ${o}, 0 0 6px ${o}`;
     subPosLayer.appendChild(el);
   });
+  // two lines wanting the same spot: stack them (bottom/middle anchors grow upward, top anchors downward) instead of overprinting
+  const els = [...subPosLayer.querySelectorAll('.sub-pos')];
+  for (let i = 1; i < els.length; i++) {
+    for (let pass = 0; pass < 8; pass++) {
+      const r = els[i].getBoundingClientRect(); let moved = false;
+      for (let j = 0; j < i; j++) {
+        const o = els[j].getBoundingClientRect();
+        if (r.left < o.right && r.right > o.left && r.top < o.bottom - 1 && r.bottom > o.top + 1) {
+          const up = placed[i].an < 7;
+          const dy = up ? -(r.bottom - o.top + 2) : (o.bottom - r.top + 2);
+          els[i].style.top = `${parseFloat(els[i].style.top) + dy}px`; moved = true; break;
+        }
+      }
+      if (!moved) break;
+    }
+  }
 }
 
 function setupSubtitleCues() {
@@ -813,6 +1081,7 @@ let glReady = false;
 let glDirty = true;
 let currentSharpness = 0.0;
 let displayEl = glCanvas;
+let glFallback = false;
 
 const vsSource = `
   attribute vec2 a_pos;
@@ -843,7 +1112,7 @@ const fsSource = `
 
 function useVideoFallback() {
   // No usable WebGL: show the <video> element directly (sharpness is unavailable).
-  glReady = false;
+  glReady = false; glFallback = true;
   glCanvas.style.display = 'none';
   video.style.display = 'block';
   video.classList.add('gl-viewport', 'aspect-contain');
@@ -920,7 +1189,18 @@ function resetFrameWatch() {
 }
 video.addEventListener('loadstart', resetFrameWatch);
 
+// With sharpening off the picture goes straight from the decoder to the screen (no per-frame texture upload),
+// which is what lets 60 fps play without lag; the WebGL canvas is only used while sharpening is on.
+function applyDisplayMode() {
+  const direct = currentSharpness <= 0, f = displayEl.style.filter;
+  if (direct) { video.classList.add('gl-viewport', 'aspect-contain'); video.style.display = 'block'; glCanvas.style.display = 'none'; displayEl = video; }
+  else { video.style.display = 'none'; glCanvas.style.display = 'block'; displayEl = glCanvas; glDirty = true; }
+  displayEl.style.filter = f;
+}
+
 function renderGLFrame() {
+  if (glReady && !glFallback && (currentSharpness <= 0) !== (displayEl === video)) applyDisplayMode();
+  if (displayEl === video) { requestAnimationFrame(renderGLFrame); return; }
   armFrameWatch();
   if (glReady && !document.hidden && video.readyState >= 2 && video.videoWidth > 0) {
     let draw = glDirty;
@@ -1297,6 +1577,20 @@ function playAdjacentEpisode(step, auto = false) {
   inspectMediaAndPlay(next.name, next.relPath || next.fullPath, 0);
 }
 
+// While an episode plays, quietly ready the next one: ffprobe result cached on the server and its first MB read into the OS cache.
+let warmedNext = '';
+function warmNextEpisode() {
+  try {
+    const idx = currentVideoList.findIndex(isActiveItem);
+    const nx = idx === -1 ? null : currentVideoList[idx + 1];
+    const rel = nx && (nx.relPath || nx.fullPath);
+    if (!rel || rel === warmedNext) return;
+    warmedNext = rel;
+    fetch(`/api/video/metadata?file=${encodeURIComponent(rel)}`).catch(() => {});
+    fetch(`/stream?file=${encodeURIComponent(rel)}`, { headers: { Range: 'bytes=0-1048575' } }).then((r) => r.arrayBuffer()).catch(() => {});
+  } catch (e) {}
+}
+
 async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   autoLevel = 0; autoSlowHits = 0;
   const token = ++playToken;
@@ -1354,6 +1648,7 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   let useTranscode = false;
   if (meta) {
     currentExplicitDuration = Number(meta.duration) || 0;
+    currentFileBytes = Number(meta.size) || 0;
     playerDurationBadge.textContent = formatTime(currentExplicitDuration);
     isCurrentFile10Bit = !!meta.is10BitHevc;
     sourceIs10Bit = isCurrentFile10Bit;
@@ -1414,6 +1709,7 @@ function finalizePlayback(seekTime) {
   initWebAudio();
   setupSubtitleCues();
   loadSavedSettings();
+  initWebAudio();   // only if a saved EQ / audio delay needs it
 
   video.onloadedmetadata = () => {
     video.playbackRate = playbackSpeed;
@@ -1426,7 +1722,9 @@ function finalizePlayback(seekTime) {
     const h = video.videoHeight;
     playerResBadge.textContent = h >= 1080 ? '1080p' : h >= 720 ? '720p' : h > 0 ? `${h}p` : 'Auto';
     updateQualityReadout();
+    setTimeout(warmNextEpisode, 15000);
     if (isTranscodingMode && needBuf() > 0 && !internalPause) { video.pause(); startRebuffer(); }
+    else if (prefs.autoPlay === false) { video.pause(); manualCenterPlay.style.display = 'flex'; updatePlayButtonIcon(false); }
     else video.play().catch(() => { manualCenterPlay.style.display = 'flex'; });
     resetHideTimer();
   };
@@ -1528,13 +1826,7 @@ video.addEventListener('error', () => {
 });
 
 function updatePlayButtonIcon(isPlaying) {
-  if (isPlaying) {
-    playBtn.classList.add('playing');
-    playIconSvg.innerHTML = '<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>';
-  } else {
-    playBtn.classList.remove('playing');
-    playIconSvg.innerHTML = '<polygon points="6 4 20 12 6 20 6 4" fill="currentColor"/>';
-  }
+  playBtn.classList.toggle('playing', !!isPlaying);   // the two icons morph in CSS
 }
 
 function updateBufferLine() {
@@ -1658,7 +1950,10 @@ async function toggleFullscreen() {
 }
 fsBtn.onclick = toggleFullscreen;
 // Phone physically rotated (or window resized) while the CSS rotation was on: drop it.
-window.addEventListener('resize', () => { if (fakeFs && window.innerWidth > window.innerHeight) { setFakeFs(false); rotatedLandscape = false; } });
+// (ignored while typing: the on-screen keyboard shrinks the window and must not drop us out of fullscreen)
+const isTyping = () => { const a = document.activeElement; return !!a && (a.tagName === 'INPUT' && !/^(range|checkbox|color|radio|button)$/.test(a.type) || a.tagName === 'TEXTAREA'); };
+let resizeT = null;
+window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (isTyping()) return; if (fakeFs && window.innerWidth > window.innerHeight) { setFakeFs(false); rotatedLandscape = false; } }, 180); });
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && fakeFs) leaveLandscape(); });
 
 // Also covers leaving fullscreen with the system back gesture.
@@ -1676,9 +1971,8 @@ playBtn.onclick = () => {
 };
 
 function syncVolIcon() {
-  volIconSvg.innerHTML = video.muted
-    ? '<line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>'
-    : '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>';
+  const off = video.muted || video.volume === 0;
+  volBtn.classList.toggle('muted', off);
 }
 function toggleMute() {
   video.muted = !video.muted;
@@ -1911,6 +2205,26 @@ function renderFloatingEpisodes() {
   });
 }
 
+// Episode label for a card: "S1 E3" from the file name, else "Episode N", else the cleaned name.
+function epCardLabel(item) {
+  const n = item.name || '';
+  let m = /S(\d{1,2})\s*[ ._-]?E(?:P)?\s?(\d{1,4})/i.exec(n) || /(\d{1,2})x(\d{2,4})/i.exec(n);
+  if (m) return `Episode s${+m[1]} e${+m[2]}`;
+  m = /(?:episode|ep|e)\s*\.?\s*(\d{1,4})/i.exec(n) || /\s-\s(\d{1,4})(?:v\d)?(?=\s|\[|\(|$)/.exec(n);
+  return m ? `Episode ${+m[1]}` : cleanMediaTitle(n);
+}
+// Season folders that belong to the same anime as the open folder: "Naruto / Season 1", "Naruto / Season 2" ...
+function seasonSiblings() {
+  if (currentPathTokens.length < 2) return [];
+  const parent = currentPathTokens.slice(0, -1).join(' / ');
+  return Object.keys(fullLibrary).filter((k) => k.split(' / ').slice(0, -1).join(' / ') === parent && k.split(' / ').length === currentPathTokens.length)
+    .sort((x, y) => x.localeCompare(y, undefined, { numeric: true }));
+}
+function seasonLabel(key) {
+  const last = key.split(' / ').pop();
+  const m = /^(?:s|season)\s*0*(\d+)$/i.exec(last.trim());
+  return m ? `Season ${m[1]}` : last;
+}
 function renderInlinePlaylist() {
   playerInlinePlaylist.innerHTML = '';
   if (currentVideoList.length === 0) {
@@ -1918,27 +2232,47 @@ function renderInlinePlaylist() {
     return;
   }
   playerShelfTitle.textContent = currentPathTokens.join(' / ') || 'Active Queue';
+  const head = playerShelfTitle.parentNode;
+  if (!head.querySelector('.q-layout')) {
+    const g = document.createElement('div'); g.className = 'q-layout seg';
+    g.innerHTML = '<button class="chip-preset" data-ql="h" data-tip="Side by side (swipe)" data-tip-pos="b r">↔</button><button class="chip-preset" data-ql="v" data-tip="All episodes" data-tip-pos="b r">↕</button>';
+    g.onclick = (e) => { const bt = e.target.closest('[data-ql]'); if (!bt) return; prefs.queueLayout = bt.dataset.ql; savePrefs(); renderInlinePlaylist(); };
+    head.appendChild(g);
+  }
+  const layout = prefs.queueLayout === 'v' ? 'v' : 'h';
+  head.querySelectorAll('[data-ql]').forEach((x) => x.classList.toggle('active', x.dataset.ql === layout));
 
+  const list = document.createElement('div');
+  list.className = `q-list ${layout === 'v' ? 'q-v' : 'q-h'}`;
   currentVideoList.forEach((item) => {
-    const row = document.createElement('div');
     const isPlaying = isActiveItem(item);
-    row.className = `explorer-row ${isPlaying ? 'active-row' : ''}`;
-    row.innerHTML = `
-      <div class="row-left">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="${isPlaying ? '#3b82f6' : 'currentColor'}"><polygon points="6 4 20 12 6 20 6 4"/></svg>
-        <div>
-          <div class="row-title">${escapeHtml(cleanMediaTitle(item.name))}</div>
-          <div class="row-sub">${subLine(item)}</div>
-        </div>
-      </div>
-      <span class="row-badge">${isPlaying ? 'Playing' : 'Play'}</span>
-    `;
-    row.onclick = () => {
-      inspectMediaAndPlay(item.name, item.relPath || item.fullPath, 0);
-      renderInlinePlaylist();
-    };
-    playerInlinePlaylist.appendChild(row);
+    const rel = item.relPath || item.fullPath;
+    const card = document.createElement('div');
+    card.className = `q-card${isPlaying ? ' playing' : ''}`;
+    card.innerHTML = `<div class="q-thumb history-thumb">${isPlaying ? '<span class="q-now">Playing</span>' : ''}</div><div class="q-name"></div>`;
+    card.querySelector('.q-name').textContent = epCardLabel(item);
+    card.title = cleanMediaTitle(item.name);
+    card.onclick = () => { inspectMediaAndPlay(item.name, rel, 0); renderInlinePlaylist(); };
+    list.appendChild(card);
+    attachThumb(card.querySelector('.q-thumb'), rel, 'video', item.name);
   });
+  playerInlinePlaylist.appendChild(list);
+  const playingCard = list.querySelector('.playing');
+  if (playingCard && layout === 'h') requestAnimationFrame(() => { list.scrollLeft = Math.max(0, playingCard.offsetLeft - 4); });
+
+  const seasons = seasonSiblings();
+  if (seasons.length > 1) {
+    const row = document.createElement('div'); row.className = 'q-seasons';
+    const here = currentPathTokens.join(' / ');
+    seasons.forEach((k) => {
+      const bt = document.createElement('button');
+      bt.className = 'chip-preset' + (k === here ? ' active' : '');
+      bt.textContent = seasonLabel(k);
+      bt.onclick = () => { currentPathTokens = k.split(' / '); currentVideoList = fullLibrary[k]; renderInlinePlaylist(); renderFloatingEpisodes(); };
+      row.appendChild(bt);
+    });
+    playerInlinePlaylist.appendChild(row);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1948,7 +2282,7 @@ async function openSubFolderPicker(dir = '') {
   $('subPickerModal').classList.add('open');
   const list = $('subPickerList');
   try {
-    const targetDir = dir || currentBrowsingDir || '/sdcard';
+    const targetDir = dir || currentBrowsingDir || '';
     const res = await fetch(`/api/storage/explore?dir=${encodeURIComponent(targetDir)}`);
     const data = await res.json();
     if (!res.ok || !data.folders) throw new Error(data.error || 'Cannot read folder');
@@ -2008,7 +2342,7 @@ if (btnGoSubPickerInput && subPickerPathInputField) {
 async function exploreFolder(dirPath = '') {
   const container = $('explorerContent');
   try {
-    const targetDir = dirPath || currentBrowsingDir || '/sdcard';
+    const targetDir = dirPath || currentBrowsingDir || '';
     const res = await fetch(`/api/storage/explore?dir=${encodeURIComponent(targetDir)}`);
     const data = await res.json();
     if (!res.ok || !data.folders) throw new Error(data.error || 'Cannot read folder');
@@ -2460,22 +2794,34 @@ async function renderHistory() {
       return;
     }
 
-    keys.forEach((k) => {
-      const item = historyCache[k];
+    // One horizontal row, left to right: the episode you were on, then its Next / Next 2 / Next 3, then the other shows.
+    const mkCard = (name, k, html, onPlay, label) => {
       const card = document.createElement('div');
-      card.className = 'history-deck-card';
+      card.className = 'history-deck-card' + (label ? ' is-next' : '');
       card.innerHTML = `
-        <div class="history-thumb"><div class="history-bar" style="width:${Math.min(100, Number(item.percent) || 0)}%"></div></div>
-        <div class="history-name">${escapeHtml(cleanMediaTitle(item.name))}</div>
-        <div class="history-time-tag">${formatTime(item.time)} / ${formatTime(item.dur)} (${Number(item.percent) || 0}%)</div>
-        <button class="pill-btn highlight mini" style="margin-top:6px;">Resume</button>
-      `;
-      card.querySelector('button').onclick = () => {
-        inspectMediaAndPlay(item.name, k, resumeStartTime(item));
-        navigateTo('player');
-      };
+        <div class="history-thumb">${label ? `<span class="hist-tag">${label}</span>` : ''}${html.bar || ''}</div>
+        <div class="history-name">${escapeHtml(cleanMediaTitle(name))}</div>
+        <div class="history-time-tag">${html.sub}</div>
+        <button class="pill-btn highlight mini" style="margin-top:6px;">${label ? 'Play' : 'Resume'}</button>`;
+      card.querySelector('button').onclick = onPlay;
       historyGrid.appendChild(card);
-      attachThumb(card.querySelector('.history-thumb'), k, 'video', item.name);
+      attachThumb(card.querySelector('.history-thumb'), k, 'video', name);
+    };
+    keys.forEach((k, idx) => {
+      const item = historyCache[k];
+      mkCard(item.name, k,
+        { bar: `<div class="history-bar" style="width:${Math.min(100, Number(item.percent) || 0)}%"></div>`, sub: `${formatTime(item.time)} / ${formatTime(item.dur)} (${Number(item.percent) || 0}%)` },
+        () => { inspectMediaAndPlay(item.name, k, resumeStartTime(item)); navigateTo('player'); }, '');
+      if (idx !== 0) return;
+      const folder = findFolderForPath(k, item.name);
+      const list = folder != null ? fullLibrary[folder] : null;
+      const at = list ? list.findIndex((v) => v.relPath === k || v.fullPath === k) : -1;
+      if (at < 0) return;
+      for (let n = 1; n <= 3 && list[at + n]; n++) {
+        const ep = list[at + n], rel = ep.relPath || ep.fullPath;
+        mkCard(ep.name, rel, { sub: n === 1 ? 'Up next' : `In ${n} episodes` },
+          () => { inspectMediaAndPlay(ep.name, rel, 0); navigateTo('player'); }, n === 1 ? 'NEXT' : `NEXT ${n}`);
+      }
     });
   } catch (e) {}
 }
@@ -2659,33 +3005,6 @@ function startRebuffer() {
 const _togglePlayPause = togglePlayPause;
 togglePlayPause = function () { if (internalPause) { endRebuffer(true); return; } _togglePlayPause(); };
 
-/* Name tips: long-press (touch) or hover (mouse) on any [data-tip] button */
-(function () {
-  let timer = null, cur = null, hideT = null, justShown = null;
-  const hide = () => { clearTimeout(hideT); if (cur) cur.classList.remove('tip-on'); cur = null; };
-  const show = (b) => { hide(); b.classList.add('tip-on'); cur = b; hideT = setTimeout(hide, 1800); };
-  document.addEventListener('pointerdown', (e) => {
-    const b = e.target.closest && e.target.closest('[data-tip]');
-    hide(); clearTimeout(timer);
-    if (!b || e.pointerType === 'mouse') return;
-    timer = setTimeout(() => { show(b); justShown = b; }, 420);
-  }, true);
-  ['pointerup', 'pointercancel', 'pointerleave', 'scroll'].forEach((ev) => document.addEventListener(ev, () => clearTimeout(timer), true));
-  document.addEventListener('click', (e) => {          // the release of a long-press must not trigger the button
-    const b = e.target.closest && e.target.closest('[data-tip]');
-    if (b && b === justShown) { e.preventDefault(); e.stopPropagation(); }
-    justShown = null;
-  }, true);
-  document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('[data-tip]')) e.preventDefault(); });
-  document.addEventListener('mouseover', (e) => {
-    const b = e.target.closest && e.target.closest('[data-tip]');
-    clearTimeout(timer);
-    if (!b) { hide(); return; }
-    if (b === cur) return;
-    timer = setTimeout(() => show(b), 450);
-  });
-})();
-
 /* Auto resolution: watch the transcoder speed, step down when it cannot keep up */
 let autoSlowHits = 0, autoLastStep = 0;
 setInterval(async () => {
@@ -2784,7 +3103,7 @@ function initPrefsPanel() {
     if (el.type === 'checkbox') { el.checked = !!prefs[key]; el.onchange = () => { prefs[key] = el.checked; savePrefs(); }; }
     else { el.value = String(prefs[key]); el.onchange = () => { prefs[key] = num ? Number(el.value) : el.value; savePrefs(); }; }
   };
-  bind('prefSeek', 'seekStep', true); bind('prefQuality', 'quality'); bind('prefBuffer', 'preBuffer', true);
+  bind('prefSeek', 'seekStep', true); bind('prefQuality', 'quality'); bind('prefAutoPlay', 'autoPlay');
   bind('prefAutoSkip', 'autoSkip'); bind('prefFsRotate', 'fsRotate'); bind('prefAutoNext', 'autoNext');
   bind('prefHw', 'hwEnc');
   bind('prefFsFill', 'fsFill'); $('prefFsFill').addEventListener('change', applyFill); applyFill();
@@ -3019,12 +3338,16 @@ let tasksData = [];
 const fmtMin = (sec) => { sec = Math.max(0, Math.round(sec || 0)); const m = Math.floor(sec / 60), r = sec % 60; return m ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`; };
 function openByPath(relPath) {
   const key = Object.keys(fullLibrary).find((k) => fullLibrary[k].some((e) => (e.relPath || e.fullPath) === relPath));
-  if (!key) { showToast('Episode not found in the library', 2500); return; }
+  const h = historyCache[relPath];
+  navigateTo('player');
+  if (!key) {                 // a video from outside the library folder (e.g. Downloads): play it straight from its path
+    currentPathTokens = []; currentVideoList = [{ name: relPath.split('/').pop(), relPath }];
+    inspectMediaAndPlay(relPath.split('/').pop(), relPath, h ? resumeStartTime(h) : 0);
+    return;
+  }
   const ep = fullLibrary[key].find((e) => (e.relPath || e.fullPath) === relPath);
   currentPathTokens = key === 'Anime Root' ? [] : key.split(' / ');
   currentVideoList = fullLibrary[key];
-  const h = historyCache[relPath];
-  navigateTo('player');
   inspectMediaAndPlay(ep.name, relPath, h ? resumeStartTime(h) : 0);
 }
 function taskCard(t) {
@@ -3052,7 +3375,7 @@ function taskCard(t) {
   const mk = (txt, cls, fn) => { const b = document.createElement('button'); b.className = `pill-btn ${cls || ''}`; b.textContent = txt; b.onclick = fn; btns.appendChild(b); };
   if (live) mk('Stop', 'danger', async () => { await fetch('/api/tasks/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: t.id }) }); refreshTasks(); });
   if (t.type === 'ai' && t.file) {
-    mk('Open episode', '', () => openByPath(t.file));
+    mk('Open video', '', () => openByPath(t.file));
     if (t.state === 'error' || t.state === 'cancelled') mk('Retry', 'highlight', async () => {
       await fetch('/api/ai/subs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: t.file, ...t.opts, priority: true }) });
       refreshTasks();
@@ -3138,5 +3461,187 @@ loadLibrary(true);
     wrap.appendChild(mk('−', -1, 'Decrease'));
     wrap.appendChild(rng);
     wrap.appendChild(mk('+', 1, 'Increase'));
+  });
+})();
+
+['play', 'pause', 'seeked', 'ratechange'].forEach((ev) => video.addEventListener(ev, () => setTimeout(assSyncAnims, 0)));
+
+// small click animations on the player buttons (arrows nudge, speaker pops)
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('#rwBtn, #ffBtn, #volBtn, #playBtn');
+  if (!b) return;
+  b.classList.remove('anim'); void b.offsetWidth; b.classList.add('anim');
+  setTimeout(() => b.classList.remove('anim'), 450);
+}, true);
+video.addEventListener('volumechange', syncVolIcon);
+
+/* ---- subtitle: save to file / remove / generate again ---- */
+function vttToSrtClient(v) {
+  let n = 0;
+  return String(v).replace(/\r/g, '').split(/\n\n+/).map((b) => {
+    const L = b.split('\n'); const i = L.findIndex((x) => x.includes('-->'));
+    if (i < 0) return '';
+    const t = L[i].replace(/\./g, ',').replace(/<[^>]+>/g, '');
+    const txt = L.slice(i + 1).join('\n').replace(/^<(?:ass|pos|position):[^>]*>/gm, '').trim();
+    return txt ? `${++n}\n${t}\n${txt}\n` : '';
+  }).filter(Boolean).join('\n');
+}
+$('btnSubDownload').onclick = async () => {
+  const row = subTrackList.querySelector('.opt-row.selected');
+  if (!row || !mainTrack.src || row.textContent.trim() === 'Off') { showToast('Pick a subtitle first', 2200); return; }
+  try {
+    const base = (cleanMediaTitle(activeVideoPath.split('/').pop() || 'subtitles') || 'subtitles').replace(/[\\/:*?"<>|]+/g, ' ');
+    const txt = await (await fetch(mainTrack.src)).text();
+    const blob = new Blob([vttToSrtClient(txt)], { type: 'application/x-subrip' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${base}.srt`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    showToast('Subtitle saved (.srt)', 2200);
+  } catch (e) { showToast('Could not save the subtitle', 2500); }
+};
+$('btnSubRemove').onclick = async () => {
+  const row = subTrackList.querySelector('.opt-row.selected');
+  if (!row || row.textContent.trim() === 'Off') { showToast('Nothing to remove - subtitles are off', 2200); return; }
+  if (!row.dataset.aiKey && !row.dataset.extPath) { showToast('Built-in tracks cannot be removed - choose Off instead', 3000); return; }
+  if (!window.confirm('Remove this subtitle?')) return;
+  if (row.dataset.aiKey) {
+    try { const r = await fetch('/api/ai/subs/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: row.dataset.aiKey }) }); const j = await r.json(); if (!r.ok) { showToast(j.error || 'Could not remove', 3000); return; } } catch (e) { showToast('Server not reachable', 2500); return; }
+    aiShow(null);
+  }
+  row.remove();
+  const off = subTrackList.querySelector('.opt-row');
+  if (off) off.click();
+  showToast('Subtitle removed', 2000);
+  if (activeVideoPath) aiCheck(activeVideoPath, false);
+};
+// "Generate" turns into "Generate again" once this mode + language already has a result
+(function () {
+  const lbl = aiUi.gen.querySelector('span');
+  const sync = (info) => { lbl.textContent = info && info.state === 'done' ? 'Generate again' : 'Generate'; };
+  const _show = aiShow; aiShow = function (info) { _show(info); sync(info); };
+  aiUi.gen.onclick = async () => {
+    if (!activeVideoPath) return;
+    const again = lbl.textContent === 'Generate again';
+    if (again && !window.confirm('Replace the existing subtitle with a fresh one?\n(To keep it and add another, change the mode or language first.)')) return;
+    const res = await fetch('/api/ai/subs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: activeVideoPath, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, mode: aiMode, priority: true, from: Math.floor(absoluteTime() || 0), force: again }) });
+    const info = await res.json();
+    if (info.error) { showToast(info.error, 5000); return; }
+    if (again) { const old = subTrackList.querySelector(`[data-ai-key="${info.key}"]`); if (old) old.remove(); }
+    aiShow(info);
+    if (info.state === 'done') { aiCheck(activeVideoPath, true); return; }
+    aiStartPolling(activeVideoPath);
+  };
+})();
+// the file picker must be visible inside fullscreen too (only the player is fullscreen): park it in the player while open
+(function () {
+  const m = $('subPickerModal'), home = m.parentNode;
+  const place = () => { const host = document.fullscreenElement || ($('playerWrapper').classList.contains('fake-fs') ? $('playerWrapper') : null); (host || home).appendChild(m); };
+  new MutationObserver(() => { if (m.classList.contains('open')) place(); else if (m.parentNode !== home) home.appendChild(m); }).observe(m, { attributes: true, attributeFilter: ['class'] });
+})();
+
+/* ===== v1.20 settings widgets ===== */
+// memory pickers: Off | 1 MB | 5 MB | 10 MB | Custom  (+ what that means in time for the current video)
+(function () {
+  const fmtT = (sec) => (sec < 1 ? '0 s' : sec < 90 ? `${Math.round(sec)} seconds` : `${Math.floor(sec / 60)} min ${Math.round(sec % 60)} s`);
+  const PRESETS = [0, 1, 5, 10];
+  const picks = [...document.querySelectorAll('.mem-pick')];
+  const tcOf = (key) => key === 'preBufMB10';
+  function render(el) {
+    const key = el.dataset.mem, mb = Number(prefs[key]) || 0, custom = el.dataset.custom === '1' || !PRESETS.includes(mb);
+    el.innerHTML = '';
+    const row = document.createElement('div'); row.className = 'mem-chips';
+    PRESETS.forEach((p) => {
+      const b = document.createElement('button'); b.className = 'chip-preset' + (!custom && mb === p ? ' active' : ''); b.textContent = p ? `${p} MB` : 'Off';
+      b.onclick = () => { prefs[key] = p; el.dataset.custom = '0'; savePrefs(); renderAll(); };
+      row.appendChild(b);
+    });
+    const cb = document.createElement('button'); cb.className = 'chip-preset' + (custom ? ' active' : ''); cb.textContent = 'Custom';
+    cb.onclick = () => { el.dataset.custom = '1'; renderAll(); };
+    row.appendChild(cb); el.appendChild(row);
+    if (custom) {
+      const cr = document.createElement('div'); cr.className = 'mem-custom';
+      const big = mb >= 1024 && mb % 1024 === 0;
+      cr.innerHTML = '<span>Memory allocation Custom</span><input type="number" min="0" step="any" inputmode="decimal" class="text-in mem-num"><select class="pref-select mem-unit"><option value="mb">MB</option><option value="gb">GB</option></select><button class="icon-btn mem-save" data-tip="Save" data-tip-pos="t"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>';
+      const num = cr.querySelector('.mem-num'), unit = cr.querySelector('.mem-unit');
+      unit.value = big ? 'gb' : 'mb'; num.value = big ? mb / 1024 : (mb || '');
+      const apply = () => { const n = parseFloat(num.value); if (!(n >= 0)) { showToast('Enter a number', 1800); return; } prefs[key] = Math.round(n * (unit.value === 'gb' ? 1024 : 1) * 100) / 100; savePrefs(); renderAll(); showToast('Saved', 1200); };
+      cr.querySelector('.mem-save').onclick = apply;
+      num.addEventListener('keydown', (e) => { if (e.key === 'Enter') apply(); });
+      el.appendChild(cr);
+    }
+    const note = document.createElement('div'); note.className = 'mem-note';
+    const sec = bufSeconds(mb, tcOf(key)), real = tcOf(key) && mb > 0 ? Math.max(5, sec) : sec;
+    note.textContent = mb > 0 ? `≈ ${fmtT(real)} of ${activeVideoPath ? 'this video' : 'a typical 720p video'} is loaded before it starts${sec >= 600 ? ' (max 10 min)' : ''}` : (tcOf(key) ? 'Starts after a 5 second head start' : 'Starts right away');
+    el.appendChild(note);
+  }
+  function renderAll() { picks.forEach(render); }
+  window.renderMemPickers = renderAll;
+  renderAll();
+})();
+// auto-play toggles inside the player settings
+document.querySelectorAll('[data-pref]').forEach((el) => {
+  el.checked = prefs[el.dataset.pref] !== false && !!prefs[el.dataset.pref];
+  el.addEventListener('change', () => { prefs[el.dataset.pref] = el.checked; savePrefs(); const o = document.getElementById('pref' + el.dataset.pref[0].toUpperCase() + el.dataset.pref.slice(1)); if (o) o.checked = el.checked; });
+});
+['prefAutoPlay', 'prefAutoNext'].forEach((id) => { const el = $(id); if (el) el.addEventListener('change', () => { const m = document.querySelector('[data-pref="' + id.slice(4, 5).toLowerCase() + id.slice(5) + '"]'); if (m) m.checked = el.checked; }); });
+// every Save button: store everything now (and sync to the other devices)
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('.save-btn');
+  if (!b) return;
+  try { saveCurrentSettings(); savePrefs(); if (typeof window.syncFlush === 'function') window.syncFlush(); } catch (x) {}
+  const sp = b.querySelector('span'), old = sp ? sp.textContent : '';
+  b.classList.add('saved'); if (sp) sp.textContent = 'Saved';
+  setTimeout(() => { b.classList.remove('saved'); if (sp) sp.textContent = old; }, 1400);
+});
+
+// Sliders: a tap on the bar no longer jumps the value (it used to change by accident while scrolling the panel).
+// Grab the round handle and drag, or use the - / + buttons. Vertical swipes scroll the panel.
+(function () {
+  const near = (r, e) => {
+    const min = +r.min || 0, max = +r.max || 100, ratio = max > min ? (r.value - min) / (max - min) : 0;
+    const box = r.getBoundingClientRect(), thumb = 24;
+    return Math.abs(e.clientX - (box.left + thumb / 2 + ratio * (box.width - thumb))) <= 30;
+  };
+  document.addEventListener('pointerdown', (e) => {
+    const r = e.target;
+    if (!r || r.tagName !== 'INPUT' || r.type !== 'range' || r.id === 'timelineSlider' || !r.closest('.settings-modal, .settings-card, .prefs-card')) return;
+    if (!near(r, e)) { e.preventDefault(); r.blur(); if (!window._sliderHint || Date.now() - window._sliderHint > 4000) { window._sliderHint = Date.now(); showToast('Drag the handle or use − / +', 1800); } }
+  }, true);
+})();
+
+// Name tips: one floating bubble (cannot be clipped by a panel); subtitle buttons need a 2 s hold
+(function () {
+  const bubble = document.createElement('div'); bubble.className = 'tip-bubble'; document.body.appendChild(bubble);
+  let timer = null, hideT = null, shown = null, ring = null;
+  const hide = () => { clearTimeout(hideT); bubble.classList.remove('on'); shown = null; };
+  const place = (b) => {
+    bubble.textContent = b.dataset.tip; bubble.style.maxWidth = '220px'; bubble.classList.add('on');
+    const r = b.getBoundingClientRect(), bw = bubble.offsetWidth, bh = bubble.offsetHeight, pos = b.dataset.tipPos || '';
+    let top = pos.includes('b') ? r.bottom + 10 : r.top - bh - 10; if (top < 6) top = r.bottom + 10; if (top + bh > innerHeight - 6) top = r.top - bh - 10;
+    let left = r.left + r.width / 2 - bw / 2; left = Math.max(8, Math.min(innerWidth - bw - 8, left));
+    bubble.style.left = left + 'px'; bubble.style.top = Math.max(6, top) + 'px';
+  };
+  const show = (b) => { shown = b; place(b); clearTimeout(hideT); hideT = setTimeout(hide, 2200); };
+  const holdOf = (b) => Number(b.dataset.tipHold) || 450;
+  document.addEventListener('pointerdown', (e) => {
+    const b = e.target.closest && e.target.closest('[data-tip]');
+    hide(); clearTimeout(timer);
+    if (!b || e.pointerType === 'mouse') return;
+    b.classList.add('tip-hold'); b.style.setProperty('--tip-hold', holdOf(b) + 'ms');
+    timer = setTimeout(() => { b.classList.remove('tip-hold'); show(b); window._tipJust = b; }, holdOf(b));
+  }, true);
+  ['pointerup', 'pointercancel', 'scroll'].forEach((ev) => document.addEventListener(ev, () => { clearTimeout(timer); document.querySelectorAll('.tip-hold').forEach((x) => x.classList.remove('tip-hold')); }, true));
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('[data-tip]');
+    if (b && b === window._tipJust) { e.preventDefault(); e.stopPropagation(); }
+    window._tipJust = null;
+  }, true);
+  document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('[data-tip]')) e.preventDefault(); });
+  document.addEventListener('mouseover', (e) => {
+    const b = e.target.closest && e.target.closest('[data-tip]');
+    clearTimeout(timer);
+    if (!b) { hide(); return; }
+    if (b === shown) return;
+    timer = setTimeout(() => show(b), b.dataset.tipHold ? 1200 : 450);
   });
 })();

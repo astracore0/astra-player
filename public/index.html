@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content">
   <title>Astra Player</title>
-  <link rel="stylesheet" href="style.css?v=240">
+  <link rel="stylesheet" href="style.css?v=280">
   <script>window.open = function() { return null; };</script>
 </head>
 <body>
@@ -127,7 +127,7 @@
 
     <div class="player-wrapper" id="playerWrapper">
       <canvas id="glCanvas" class="gl-viewport aspect-contain"></canvas>
-      <video id="videoElement" playsinline preload="metadata" crossorigin="anonymous" style="display:none;">
+      <video id="videoElement" playsinline disablepictureinpicture disableremoteplayback preload="auto" crossorigin="anonymous" style="display:none;">
         <track id="mainTrack" kind="subtitles" srclang="en" label="Subtitles" default>
       </video>
 
@@ -185,7 +185,7 @@
         <div class="controls-row">
           <div class="btn-group">
             <button class="icon-btn" id="playBtn" data-tip="Play / Pause">
-              <svg id="playIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+              <svg id="playIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><g class="ic-play"><polygon points="6 4 20 12 6 20 6 4"/></g><g class="ic-pause"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></g></svg>
             </button>
             <button class="icon-btn" id="rwBtn" data-tip="Back 10s">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>
@@ -194,7 +194,7 @@
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
             </button>
             <button class="icon-btn" id="volBtn" data-tip="Volume">
-              <svg id="volIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+              <svg id="volIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon class="vs" points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><g class="vw"><path class="w1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="w2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></g><g class="vx"><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></g></svg>
             </button>
           </div>
 
@@ -225,7 +225,7 @@
       <div class="settings-modal" id="settingsModal">
         <div class="modal-tabs">
           <button class="tab-btn active" data-target="tabFilters" data-tip="Filters" data-tip-pos="b"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18" opacity=".0"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg><span>Filters</span></button>
-          <button class="tab-btn" data-target="tabSubs" data-tip="Subtitles" data-tip-pos="b"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 11h4M14 11h4M6 15h8"/></svg><span>Subs</span></button>
+          <button class="tab-btn" data-target="tabSubs" data-tip="Subtitles" data-tip-hold="2000" data-tip-pos="b"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 11h4M14 11h4M6 15h8"/></svg><span>Subs</span></button>
           <button class="tab-btn" data-target="tabSpeed" data-tip="Speed & sync" data-tip-pos="b"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 13l4-4M9 3h6"/></svg><span>Speed</span></button>
           <button class="tab-btn" data-target="tabAudio" data-tip="Audio" data-tip-pos="b"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19 5a10 10 0 0 1 0 14M15.5 8.5a5 5 0 0 1 0 7"/></svg><span>Audio</span></button>
           <button class="modal-close" id="closeSettingsBtn" aria-label="Close settings" data-tip="Close" data-tip-pos="b r"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -262,13 +262,14 @@
             <div class="slider-row"><label>Saturation <span class="val" id="lblSat">100%</span></label><input type="range" class="custom-range" id="rngSat" min="0" max="220" value="100"></div>
             <div class="slider-row"><label>Hue <span class="val" id="lblHue">0°</span></label><input type="range" class="custom-range" id="rngHue" min="0" max="360" value="0"></div>
             <div class="slider-row"><label>Warmth <span class="val" id="lblWarm">0%</span></label><input type="range" class="custom-range" id="rngWarm" min="0" max="100" value="0"></div>
+            <button class="pill-btn highlight save-btn" data-save="filters"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
           </div>
         </div>
 
         <div class="tab-body" id="tabSubs">
           <div class="card">
             <div class="card-head"><h6>Track</h6>
-              <button class="icon-btn sub-gear" id="btnToggleSubStylePanel" aria-label="Subtitle styling" data-tip="Subtitle style" data-tip-pos="b r">
+              <button class="icon-btn sub-gear" id="btnToggleSubStylePanel" aria-label="Subtitle styling" data-tip="Subtitle style" data-tip-hold="2000" data-tip-pos="b r">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               </button>
             </div>
@@ -277,6 +278,10 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
               <span>Add subtitle file</span>
             </button>
+            <div class="ai-row sub-act-row">
+              <button class="pill-btn grow" id="btnSubDownload" data-tip="Save this subtitle as a file" data-tip-hold="2000" data-tip-pos="t"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Save</span></button>
+              <button class="pill-btn danger grow" id="btnSubRemove" data-tip="Remove the selected subtitle" data-tip-hold="2000" data-tip-pos="t"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span>Remove</span></button>
+            </div>
           </div>
 
           <div class="card ai-box" id="aiBox">
@@ -308,32 +313,22 @@
             <p class="ai-hint">+ shows subtitles later, − earlier. Keys: Z / X (±0.1s)</p>
           </div>
 
-          <div id="subStyleSection" style="display:none; margin-top:8px; padding-top:8px; border-top:1px solid rgba(70,95,140,0.25);">
-            <span class="card-title">Subtitle Appearance</span>
-            <div class="slider-row">
-              <label>Font Size: <span id="lblSubSize">18px</span></label>
-              <input type="range" class="custom-range" id="rngSubSize" min="12" max="36" value="18">
-            </div>
-
-            <div class="slider-row">
-              <label>Text Scale: <span id="lblSubScale">100%</span></label>
-              <input type="range" class="custom-range" id="rngSubScale" min="60" max="150" value="100">
-            </div>
-
-            <div class="checkbox-row" style="margin-top:4px;">
-              <label><input type="checkbox" id="chkSubBold" checked> Bold Font</label>
-              <label><input type="checkbox" id="chkSubShadow" checked> Drop Shadow</label>
-            </div>
-
-            <div class="checkbox-row">
-              <label><input type="checkbox" id="chkSubBorder" checked> Outline/Border</label>
-              <label><input type="checkbox" id="chkSubBg"> Box Background</label>
-            </div>
-
-            <div class="color-pick-row" style="margin-top:6px;">
-              <label>Color: <input type="color" id="colSubText" value="#ffffff"></label>
-              <label>Outline: <input type="color" id="colSubBorder" value="#000000"></label>
-            </div>
+          <div id="subStyleSection" class="card" style="display:block">
+            <div class="card-head"><h6>Subtitle look</h6><button class="mini-link" id="btnSubStyleReset">Reset</button></div>
+            <div class="slider-row"><label>Font <select class="pref-select" id="selSubFont" style="max-width:60%">
+              <option value="">Default</option><option value="sans">Clean sans</option><option value="serif">Serif</option><option value="mono">Mono</option>
+              <option value="round">Rounded</option><option value="comic">Comic</option><option value="impact">Impact</option><option value="hand">Handwriting</option>
+            </select></label></div>
+            <div class="slider-row"><label>Size <span id="lblSubSize">18px</span></label><input type="range" class="custom-range" id="rngSubSize" min="12" max="48" value="18"></div>
+            <div class="slider-row"><label>Scale <span id="lblSubScale">100%</span></label><input type="range" class="custom-range" id="rngSubScale" min="60" max="150" value="100"></div>
+            <div class="slider-row"><label>Border size <span id="lblSubOutline">1.5px</span></label><input type="range" class="custom-range" id="rngSubOutline" min="0" max="8" step="0.5" value="1.5"></div>
+            <div class="slider-row"><label>Background <span id="lblSubBgOp">Off</span></label><input type="range" class="custom-range" id="rngSubBgOp" min="0" max="100" step="5" value="0"></div>
+            <div class="slider-row"><label>Height from bottom <span id="lblSubPos">0%</span></label><input type="range" class="custom-range" id="rngSubPos" min="-5" max="80" step="1" value="0"></div>
+            <div class="checkbox-row"><label><input type="checkbox" id="chkSubBold" checked> Bold</label><label><input type="checkbox" id="chkSubShadow" checked> Shadow</label>
+              <label><input type="checkbox" id="chkSubBorder" checked> Border</label><label><input type="checkbox" id="chkSubBg" style="display:none"></label></div>
+            <div class="color-pick-row"><label>Text <input type="color" id="colSubText" value="#ffffff"></label><label>Border <input type="color" id="colSubBorder" value="#000000"></label><label>Box <input type="color" id="colSubBgCol" value="#000000"></label></div>
+            <p class="ai-hint">Lifts automatically above the controls while they are showing.</p>
+            <button class="pill-btn highlight save-btn" data-save="subs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
           </div>
         </div>
 
@@ -351,6 +346,19 @@
           <div class="card">
             <div class="card-head"><h6>Audio sync</h6></div>
             <div class="slider-row"><label>Delay fix <span class="val" id="lblAudioOffset">0.0s</span></label><input type="range" class="custom-range" id="rngAudioOffset" min="-5.0" max="5.0" step="0.05" value="0.0"></div>
+            <button class="pill-btn highlight save-btn" data-save="audio"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
+          </div>
+          <div class="card">
+            <div class="card-head"><h6>Playback</h6></div>
+            <label class="switch-row"><input type="checkbox" data-pref="autoPlay"><i class="tgl"></i><span>Auto-play when a video opens</span></label>
+            <label class="switch-row"><input type="checkbox" data-pref="autoNext"><i class="tgl"></i><span>Auto-play next episode</span></label>
+            <button class="pill-btn highlight save-btn" data-save="prefs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
+          </div>
+          <div class="card">
+            <div class="card-head"><h6>Pre-buffer</h6></div>
+            <div class="mem-title">8-bit video (direct)</div><div class="mem-pick" data-mem="preBufMB8"></div>
+            <div class="mem-title">10-bit video (converted live)</div><div class="mem-pick" data-mem="preBufMB10"></div>
+            <button class="pill-btn highlight save-btn" data-save="prefs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
           </div>
         </div>
 
@@ -378,6 +386,7 @@
             </div>
             <div class="slider-row"><label>Bass <span class="val" id="lblBass">0 dB</span></label><input type="range" class="custom-range" id="eqBass" min="-12" max="15" value="0"></div>
             <div class="slider-row"><label>Treble <span class="val" id="lblTreble">0 dB</span></label><input type="range" class="custom-range" id="eqTreble" min="-12" max="15" value="0"></div>
+            <button class="pill-btn highlight save-btn" data-save="audio"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
           </div>
         </div>
       </div>
@@ -445,16 +454,18 @@
         <select class="pref-select" id="prefQuality"><option value="auto">Auto (adapts to speed)</option><option value="low">Low (360p)</option><option value="fast">Fast (480p)</option><option value="balanced">Balanced (720p)</option><option value="quality">Quality (720p+)</option></select></div>
       <div class="setting-item"><div><h5>Hardware encoder</h5><p>Software = x264 (the v1.3 engine, most reliable). Auto tries the phone's H.264 encoder first</p></div>
         <select class="pref-select" id="prefHw"><option value="auto">Auto</option><option value="off">Software</option></select></div>
-      <div class="setting-item"><div><h5>Pre-buffer (transcode)</h5><p>Wait to build a lead before playing</p></div>
-        <select class="pref-select" id="prefBuffer"><option value="0">Off</option><option value="5">5 s</option><option value="10">10 s</option><option value="20">20 s</option><option value="40">40 s</option></select></div>
+      <div class="setting-item col"><div><h5>Pre-buffer · 8-bit videos</h5><p>Memory to fill before playing starts</p></div><div class="mem-pick" data-mem="preBufMB8"></div></div>
+      <div class="setting-item col"><div><h5>Pre-buffer · 10-bit videos</h5><p>Converted live, so it needs a head start (min 5 s)</p></div><div class="mem-pick" data-mem="preBufMB10"></div></div>
       <div class="setting-item"><div><h5>Auto-skip opening / ending</h5><p>Uses chapter names when available</p></div><label class="switch"><input type="checkbox" id="prefAutoSkip"><span></span></label></div>
-      <div class="setting-item"><div><h5>Auto-play next episode</h5></div><label class="switch"><input type="checkbox" id="prefAutoNext"><span></span></label></div>
+      <div class="setting-item"><div><h5>Auto-play when a video opens</h5><p>Off = waits for you to press play</p></div><label class="switch"><input type="checkbox" id="prefAutoPlay"><span></span></label></div>
+      <div class="setting-item"><div><h5>Auto-play next episode</h5><p>Off = stops at the end</p></div><label class="switch"><input type="checkbox" id="prefAutoNext"><span></span></label></div>
       <div class="setting-item"><div><h5>Landscape fullscreen</h5><p>Fullscreen turns the screen sideways to fill it</p></div><label class="switch"><input type="checkbox" id="prefFsRotate"><span></span></label></div>
       <div class="setting-item"><div><h5>Fill screen (crop edges)</h5><p>Off = whole picture fits inside the screen</p></div><label class="switch"><input type="checkbox" id="prefFsFill"><span></span></label></div>
       <div class="setting-item"><div><h5>Show thumbnails</h5><p>Local covers or one cached frame</p></div><label class="switch"><input type="checkbox" id="prefThumbs"><span></span></label></div>
       <div class="setting-item"><div><h5>Sleep timer</h5><p id="sleepText">Off</p></div>
         <select class="pref-select" id="prefSleep"><option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option><option value="-1">End of episode</option></select></div>
       <div class="setting-item"><div><h5>Thumbnail cache</h5></div><button class="action-btn" id="btnClearThumbs">Clear</button></div>
+      <div class="setting-item"><div><h5>Save preferences</h5><p>Also synced to your other devices</p></div><button class="pill-btn highlight save-btn" data-save="prefs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button></div>
     </div>
 
     <div class="settings-card">
@@ -502,6 +513,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=240"></script>
+  <script src="script.js?v=280"></script>
 </body>
 </html>
