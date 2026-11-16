@@ -884,3 +884,51 @@ body.fake-fs-on { overflow: hidden; }
 #historyGrid .history-deck-card.is-next { opacity: .92; border-style: dashed; }
 .hist-tag { position: absolute; left: 8px; top: 8px; z-index: 3; font-size: .66rem; font-weight: 800; letter-spacing: .6px; padding: 3px 8px; border-radius: 999px; background: var(--accent); color: #fff; }
 @media (prefers-reduced-motion: reduce) { .tab-body.show, .tab-body.show .card { animation: none; } }
+
+.sub-act-row { margin-top: 8px; }
+.save-btn { align-self: flex-start; margin-top: 8px; }
+.save-btn.saved { background: #16a34a; border-color: #16a34a; }
+.custom-subtitle-display, #subTopBox { transition: bottom .2s var(--ease), transform .1s ease; }
+
+/* ===== v1.20 ===== */
+[data-tip]::after { display: none !important; }
+.tip-bubble { position: fixed; z-index: 400; left: 0; top: 0; padding: 8px 13px; font: 700 .78rem/1.25 inherit; color: #fff; background: rgba(8, 12, 22, .96); border: 1px solid rgba(255,255,255,.22); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.6); pointer-events: none; opacity: 0; transform: translateY(4px) scale(.96); transition: opacity .16s ease, transform .18s var(--ease); }
+.tip-bubble.on { opacity: 1; transform: none; }
+[data-tip].tip-hold { outline: 2px solid var(--accent); outline-offset: 2px; animation: tipRing var(--tip-hold, 450ms) linear; }
+@keyframes tipRing { from { outline-color: transparent; } to { outline-color: var(--accent); } }
+.custom-range { touch-action: pan-y; }
+.mem-pick { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.setting-item.col { flex-direction: column; align-items: stretch; gap: 8px; }
+.mem-title { font-size: .78rem; font-weight: 700; color: var(--text-2); margin-top: 6px; }
+.mem-chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+.mem-chips::-webkit-scrollbar { display: none; }
+.mem-chips .chip-preset { flex: 0 0 auto; }
+.mem-custom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: .76rem; color: var(--text-2); }
+.mem-custom > span { flex: 1 1 100%; font-weight: 700; }
+.mem-num { width: 90px; min-width: 0; }
+.mem-note { font-size: .72rem; color: var(--muted); line-height: 1.35; }
+.switch-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: .84rem; }
+
+.q-layout { display: inline-flex; gap: 4px; margin-left: auto; }
+.q-layout .chip-preset { padding: 4px 10px; min-width: 34px; }
+.shelf-header { display: flex; align-items: center; gap: 8px; }
+#playerInlinePlaylist { display: block; }
+.q-list { display: flex; gap: 10px; }
+.q-list.q-h { overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; -webkit-overflow-scrolling: touch; padding-bottom: 6px; }
+.q-list.q-h::-webkit-scrollbar { display: none; }
+.q-list.q-h .q-card { flex: 0 0 calc((100% - 20px) / 3); scroll-snap-align: start; }
+.q-list.q-v { flex-wrap: wrap; }
+.q-list.q-v .q-card { flex: 0 0 calc((100% - 20px) / 3); }
+@media (min-width: 760px) { .q-list.q-v .q-card { flex-basis: calc((100% - 50px) / 6); } .q-list.q-h .q-card { flex-basis: calc((100% - 30px) / 4); } }
+.q-card { cursor: pointer; min-width: 0; border-radius: 12px; overflow: hidden; background: var(--surface-2); border: 1px solid var(--line); transition: transform .15s var(--ease), border-color .15s; }
+.q-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.q-card:active { transform: scale(.97); }
+.q-card.playing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.q-thumb { position: relative; aspect-ratio: 16 / 9; background: var(--surface-3); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.q-thumb img, .q-thumb canvas { width: 100%; height: 100%; object-fit: cover; }
+.q-now { position: absolute; left: 6px; top: 6px; z-index: 3; font-size: .6rem; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: var(--accent); color: #fff; }
+.q-name { font-size: .74rem; font-weight: 700; padding: 7px 8px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-card.playing .q-name { color: var(--accent); }
+.q-seasons { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin-top: 12px; padding-bottom: 4px; }
+.q-seasons::-webkit-scrollbar { display: none; }
+.q-seasons .chip-preset { flex: 0 0 auto; }

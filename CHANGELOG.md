@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.20.0
+- Subtitles: font choice, border size, background colour + transparency, height from the bottom; they lift above the control bar automatically; Remove and Save (.srt) buttons; Generate becomes Generate again (replace) when this mode + language already exists; the file picker now opens inside fullscreen.
+- Settings: separate Auto-play (on open) and Auto-play next toggles; pre-buffer in MB for 8-bit and 10-bit (Off / 1 / 5 / 10 MB / Custom MB-GB) with the equivalent seconds for the open video; Save buttons everywhere.
+- Sliders ignore taps on the bar (drag the handle or use - / +), vertical swipes scroll the panel.
+- Button tips are a floating bubble (never clipped); subtitle buttons need a 2 s hold.
+- Open video (Task Manager) now works for files outside the library folder (e.g. Downloads); file explorers start in the library folder instead of /sdcard.
+- Fullscreen keyboard: the page no longer resizes when the keyboard opens and the resize handler ignores typing, so no more flicker/exit.
+- Episode queue: thumbnail cards, 3 side-by-side (swipe) or all (vertical) with a toggle, season chips for sibling folders.
+
 ## v1.19.0 (UI animation)
 - Mute shows a speaker with a ✕ (sound waves fade out, ✕ draws in); the speaker pops on click.
 - Play/Pause morph into each other; back/forward arrows nudge in their direction; buttons pulse on tap.

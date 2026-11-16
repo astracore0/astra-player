@@ -325,7 +325,7 @@ app.get('/api/video/metadata', (req, res) => {
         }
       });
 
-      const out = { audioTracks, subtitleTracks, is10BitHevc, duration, chapters };
+      const out = { audioTracks, subtitleTracks, is10BitHevc, duration, chapters, size: r.stat.size };
       if (duration > 0) metaCacheSet(mkey, out);
       res.json(out);
       prefetchSubtitles(r, subtitleTracks); // background, instant subtitles later
@@ -1783,10 +1783,29 @@ app.get('/api/ai/subs', (req, res) => {
   res.json({ key: p.key, state: st, pct: 0, msg: job && st !== 'none' ? job.msg : '', model: p.model, queued: aiQueue.length });
 });
 
+/* Remove one finished subtitle completely (result, readable exports, chunk cache). */
+function aiRemove(key) {
+  if (!/^[0-9a-f]{40}$/.test(key)) return false;
+  const e = aiIndex[key];
+  try { fs.rmSync(aiCacheFile(key), { force: true }); } catch (x) {}
+  try { fs.rmSync(path.join(AI_DIR, key), { recursive: true, force: true }); } catch (x) {}
+  try { fs.rmSync(aiPartFile(key), { force: true }); } catch (x) {}
+  if (e && e.name) ['srt', 'vtt'].forEach((x) => { try { fs.rmSync(path.join(AI_EXPORT_DIR, `${e.name}.${x}`), { force: true }); } catch (y) {} });
+  delete aiIndex[key]; aiIndexSave(); aiJobs.delete(key);
+  return true;
+}
+app.post('/api/ai/subs/remove', (req, res) => {
+  const key = String((req.body && req.body.key) || '');
+  const job = aiJobs.get(key);
+  if (job && ['queued', 'extracting', 'transcribing'].includes(job.state)) return res.status(409).json({ error: 'Still running - stop it first' });
+  res.json({ ok: aiRemove(key) });
+});
+
 app.post('/api/ai/subs', (req, res) => {
   if (!findWhisperBin() || !listWhisperModels().names.length) return res.status(501).json({ error: 'whisper.cpp / model not installed (see README)' });
   const p = aiParams(req.body || {});
   if (p.error) return res.status(p.status).json({ error: p.error });
+  if (req.body && req.body.force && !aiJobs.has(p.key)) aiRemove(p.key);          // "Generate again": throw the old result away first
   if (fs.existsSync(aiCacheFile(p.key))) return res.json({ key: p.key, state: 'done', pct: 100 });
   const existing = aiJobs.get(p.key);
   if (existing && ['queued', 'extracting', 'transcribing'].includes(existing.state)) {
