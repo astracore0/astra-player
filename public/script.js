@@ -1770,13 +1770,7 @@ video.addEventListener('error', () => {
 });
 
 function updatePlayButtonIcon(isPlaying) {
-  if (isPlaying) {
-    playBtn.classList.add('playing');
-    playIconSvg.innerHTML = '<rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/>';
-  } else {
-    playBtn.classList.remove('playing');
-    playIconSvg.innerHTML = '<polygon points="6 4 20 12 6 20 6 4" fill="currentColor"/>';
-  }
+  playBtn.classList.toggle('playing', !!isPlaying);   // the two icons morph in CSS
 }
 
 function updateBufferLine() {
@@ -1918,9 +1912,8 @@ playBtn.onclick = () => {
 };
 
 function syncVolIcon() {
-  volIconSvg.innerHTML = video.muted
-    ? '<line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>'
-    : '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>';
+  const off = video.muted || video.volume === 0;
+  volBtn.classList.toggle('muted', off);
 }
 function toggleMute() {
   video.muted = !video.muted;
@@ -2702,22 +2695,34 @@ async function renderHistory() {
       return;
     }
 
-    keys.forEach((k) => {
-      const item = historyCache[k];
+    // One horizontal row, left to right: the episode you were on, then its Next / Next 2 / Next 3, then the other shows.
+    const mkCard = (name, k, html, onPlay, label) => {
       const card = document.createElement('div');
-      card.className = 'history-deck-card';
+      card.className = 'history-deck-card' + (label ? ' is-next' : '');
       card.innerHTML = `
-        <div class="history-thumb"><div class="history-bar" style="width:${Math.min(100, Number(item.percent) || 0)}%"></div></div>
-        <div class="history-name">${escapeHtml(cleanMediaTitle(item.name))}</div>
-        <div class="history-time-tag">${formatTime(item.time)} / ${formatTime(item.dur)} (${Number(item.percent) || 0}%)</div>
-        <button class="pill-btn highlight mini" style="margin-top:6px;">Resume</button>
-      `;
-      card.querySelector('button').onclick = () => {
-        inspectMediaAndPlay(item.name, k, resumeStartTime(item));
-        navigateTo('player');
-      };
+        <div class="history-thumb">${label ? `<span class="hist-tag">${label}</span>` : ''}${html.bar || ''}</div>
+        <div class="history-name">${escapeHtml(cleanMediaTitle(name))}</div>
+        <div class="history-time-tag">${html.sub}</div>
+        <button class="pill-btn highlight mini" style="margin-top:6px;">${label ? 'Play' : 'Resume'}</button>`;
+      card.querySelector('button').onclick = onPlay;
       historyGrid.appendChild(card);
-      attachThumb(card.querySelector('.history-thumb'), k, 'video', item.name);
+      attachThumb(card.querySelector('.history-thumb'), k, 'video', name);
+    };
+    keys.forEach((k, idx) => {
+      const item = historyCache[k];
+      mkCard(item.name, k,
+        { bar: `<div class="history-bar" style="width:${Math.min(100, Number(item.percent) || 0)}%"></div>`, sub: `${formatTime(item.time)} / ${formatTime(item.dur)} (${Number(item.percent) || 0}%)` },
+        () => { inspectMediaAndPlay(item.name, k, resumeStartTime(item)); navigateTo('player'); }, '');
+      if (idx !== 0) return;
+      const folder = findFolderForPath(k, item.name);
+      const list = folder != null ? fullLibrary[folder] : null;
+      const at = list ? list.findIndex((v) => v.relPath === k || v.fullPath === k) : -1;
+      if (at < 0) return;
+      for (let n = 1; n <= 3 && list[at + n]; n++) {
+        const ep = list[at + n], rel = ep.relPath || ep.fullPath;
+        mkCard(ep.name, rel, { sub: n === 1 ? 'Up next' : `In ${n} episodes` },
+          () => { inspectMediaAndPlay(ep.name, rel, 0); navigateTo('player'); }, n === 1 ? 'NEXT' : `NEXT ${n}`);
+      }
     });
   } catch (e) {}
 }
@@ -3384,3 +3389,12 @@ loadLibrary(true);
 })();
 
 ['play', 'pause', 'seeked', 'ratechange'].forEach((ev) => video.addEventListener(ev, () => setTimeout(assSyncAnims, 0)));
+
+// small click animations on the player buttons (arrows nudge, speaker pops)
+document.addEventListener('click', (e) => {
+  const b = e.target.closest && e.target.closest('#rwBtn, #ffBtn, #volBtn, #playBtn');
+  if (!b) return;
+  b.classList.remove('anim'); void b.offsetWidth; b.classList.add('anim');
+  setTimeout(() => b.classList.remove('anim'), 450);
+}, true);
+video.addEventListener('volumechange', syncVolIcon);

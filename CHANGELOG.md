@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.19.0 (UI animation)
+- Mute shows a speaker with a ✕ (sound waves fade out, ✕ draws in); the speaker pops on click.
+- Play/Pause morph into each other; back/forward arrows nudge in their direction; buttons pulse on tap.
+- Settings / Episodes / Chapters panels: tabs and cards fade in, smoother scrim; small screens show icon-only pills so the control bar never overflows.
+- Watch history is one horizontal row, left to right: your episode, then NEXT, NEXT 2, NEXT 3, then your other shows.
+
 ## v1.18.0 (speed)
 - Direct play (8-bit): 1 MB file reads, 8 MB range chunks, TCP no-delay and cache headers; the video element preloads fully.
 - Web Audio (delay/EQ chain) is built only when you use audio delay or EQ, so plain playback has no extra audio processing.

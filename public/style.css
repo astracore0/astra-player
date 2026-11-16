@@ -839,3 +839,48 @@ body.fake-fs-on { overflow: hidden; }
 .rng-wrap .custom-range { flex: 1 1 auto; min-width: 0; }
 .rng-btn { flex: none; width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--pn-line, rgba(110,140,190,.25)); background: var(--pn-card, #141a25); color: #dbe4f5; font-size: 1.1rem; line-height: 1; cursor: pointer; touch-action: manipulation; user-select: none; }
 .rng-btn:active { background: var(--accent); color: #fff; }
+
+/* ===== v1.19: icon animation, panel polish, horizontal history ===== */
+#playIconSvg g { transform-box: fill-box; transform-origin: center; transition: transform .24s var(--ease), opacity .16s ease; }
+#playIconSvg .ic-pause { opacity: 0; transform: scale(.4) rotate(-60deg); }
+#playBtn.playing #playIconSvg .ic-play { opacity: 0; transform: scale(.4) rotate(60deg); }
+#playBtn.playing #playIconSvg .ic-pause { opacity: 1; transform: none; }
+#volIconSvg .vw path { transition: opacity .2s ease, transform .22s var(--ease); transform-box: fill-box; transform-origin: left center; }
+#volIconSvg .vx line { stroke-dasharray: 9; stroke-dashoffset: 9; transition: stroke-dashoffset .24s var(--ease); }
+#volIconSvg .vx line + line { transition-delay: .06s; }
+#volBtn.muted #volIconSvg .vw path { opacity: 0; transform: scale(.4); }
+#volBtn.muted #volIconSvg .vx line { stroke-dashoffset: 0; }
+#volBtn.muted { color: #ff7b8a; }
+#volBtn.anim #volIconSvg .vs { animation: spkPop .35s var(--ease); transform-box: fill-box; transform-origin: center; }
+@keyframes spkPop { 0% { transform: scale(1); } 40% { transform: scale(.82); } 100% { transform: scale(1); } }
+#rwBtn.anim svg { animation: nudgeL .38s var(--ease); }
+#ffBtn.anim svg { animation: nudgeR .38s var(--ease); }
+@keyframes nudgeL { 0% { transform: translateX(0); } 35% { transform: translateX(-6px); opacity: .5; } 100% { transform: translateX(0); opacity: 1; } }
+@keyframes nudgeR { 0% { transform: translateX(0); } 35% { transform: translateX(6px); opacity: .5; } 100% { transform: translateX(0); opacity: 1; } }
+#playBtn.anim { animation: btnPulse .3s var(--ease); }
+@keyframes btnPulse { 50% { transform: scale(.88); } }
+.ripple-wave { transition: transform .22s var(--ease), opacity .22s; }
+
+.tab-body.show { animation: tabIn .22s var(--ease); }
+.tab-body.show .card { animation: tabIn .26s var(--ease) both; }
+.tab-body.show .card:nth-child(2) { animation-delay: .04s; }
+.tab-body.show .card:nth-child(3) { animation-delay: .08s; }
+.tab-body.show .card:nth-child(n+4) { animation-delay: .12s; }
+@keyframes tabIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.tab-btn { position: relative; transition: color .18s, background .18s, border-color .18s, transform .12s; }
+.tab-btn:active { transform: scale(.94); }
+.settings-modal, .player-episodes-drawer, .chapters-panel { will-change: transform, opacity; }
+.panel-scrim { transition: opacity .24s ease; }
+.controls-row .btn-group { gap: 6px; }
+.controls-row .pill-btn:active { transform: scale(.94); }
+@media (max-width: 520px) { .controls-row .pill-btn span { display: none; } .controls-row .pill-btn { padding: 9px 11px; } }
+
+#historyGrid.history-grid {
+  display: flex; flex-wrap: nowrap; gap: 12px; overflow-x: auto; overflow-y: hidden; padding: 4px 2px 12px;
+  scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+#historyGrid.history-grid::-webkit-scrollbar { display: none; }
+#historyGrid .history-deck-card { flex: 0 0 min(230px, 64vw); scroll-snap-align: start; }
+#historyGrid .history-deck-card.is-next { opacity: .92; border-style: dashed; }
+.hist-tag { position: absolute; left: 8px; top: 8px; z-index: 3; font-size: .66rem; font-weight: 800; letter-spacing: .6px; padding: 3px 8px; border-radius: 999px; background: var(--accent); color: #fff; }
+@media (prefers-reduced-motion: reduce) { .tab-body.show, .tab-body.show .card { animation: none; } }

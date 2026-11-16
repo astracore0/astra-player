@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Astra Player</title>
-  <link rel="stylesheet" href="style.css?v=270">
+  <link rel="stylesheet" href="style.css?v=271">
   <script>window.open = function() { return null; };</script>
 </head>
 <body>
@@ -185,7 +185,7 @@
         <div class="controls-row">
           <div class="btn-group">
             <button class="icon-btn" id="playBtn" data-tip="Play / Pause">
-              <svg id="playIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+              <svg id="playIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><g class="ic-play"><polygon points="6 4 20 12 6 20 6 4"/></g><g class="ic-pause"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></g></svg>
             </button>
             <button class="icon-btn" id="rwBtn" data-tip="Back 10s">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>
@@ -194,7 +194,7 @@
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
             </button>
             <button class="icon-btn" id="volBtn" data-tip="Volume">
-              <svg id="volIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+              <svg id="volIconSvg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon class="vs" points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><g class="vw"><path class="w1" d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path class="w2" d="M19.07 4.93a10 10 0 0 1 0 14.14"/></g><g class="vx"><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></g></svg>
             </button>
           </div>
 
@@ -502,6 +502,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=270"></script>
+  <script src="script.js?v=271"></script>
 </body>
 </html>
