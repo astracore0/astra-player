@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.17.1 (SRT styling)
+- .srt files are read directly (ffmpeg used to merge cues that start together): <font face/size/color>, <b>/<i>/<u> and {\an7-9} now show as written in the file.
+- Syllable-by-syllable subtitles (one tiny cue per letter/syllable) are joined into one line instead of a vertical column.
+- Outline+fill duplicate layers show once; drawing code that leaked into SRT text is hidden; lines on the same spot stack instead of overlapping.
+
 ## v1.17.0 (subtitle engine)
 - ASS subtitles now draw like a real player: all 9 screen positions (corners, top, middle, bottom) with the file's margins, \pos and \move paths, \fad/\fade fades, \t animation (rotate, scale, size, colour, blur, outline), karaoke (\k/\kf/\ko), rotation, outline/shadow/blur, fonts named in the file, bold/italic/underline/strike, and vector drawings (\p) rendered as SVG shapes.
 - Animations stay locked to the video clock: they pause with the video and re-sync after a seek.

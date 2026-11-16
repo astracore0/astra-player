@@ -785,6 +785,25 @@ function renderAss(info, cue, rect, layer) {
   return outer;
 }
 // keep every animation locked to the video clock (seek, pause, play)
+// An SRT that spells a line out syllable by syllable (one tiny cue each, all on screen together) is one line, not a column.
+function assMergeSyllables(list) {
+  const groups = new Map(), out = [];
+  list.forEach((it) => {
+    const inf = it.info, r = inf.runs || [];
+    const tiny = !inf.pos && !inf.mv && !inf.dr && r.length === 1 && r[0].t.length <= 6 && !/\n/.test(r[0].t);
+    if (!tiny) { out.push(it); return; }
+    const b = inf.base, key = [inf.an, b.c1, b.c3, b.fn, b.fs, b.b, r[0].c1, r[0].fs].join('|');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  });
+  groups.forEach((g) => {
+    if (g.length < 3) { out.push(...g); return; }
+    g.sort((a, b) => a.cue.startTime - b.cue.startTime || a.i - b.i);
+    const first = g[0], merged = { ...first, info: { ...first.info, runs: g.map((x) => ({ ...x.info.runs[0], t: x.info.runs[0].t + '\u200a' })) } };
+    merged.n = g.length; out.push(merged);
+  });
+  return out.sort((a, b) => a.i - b.i);
+}
 function assSyncAnims() {
   if (!assAnims.length) return;
   const t = absoluteTime() - subDelay;
@@ -830,8 +849,9 @@ function updateSubtitleDisplay() {
     }
   }
 
+  if (assList.length > 2) { const m = assMergeSyllables(assList); assList.length = 0; assList.push(...m); }
   const rect = (placed.length || assList.length) ? pictureRect() : null;
-  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${assList.map((a) => a.i + ':' + a.cue.startTime).join(',')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
+  const signature = `${topText ? 'T' : 'B'}|${topText || bottomText}|${placed.map((p) => `${p.x},${p.y},${p.an},${p.fs},${p.c1},${p.html}`).join(';')}|${assList.map((a) => a.i + ':' + a.cue.startTime + ':' + (a.n || 1)).join(',')}|${rect ? Math.round(rect.w) + 'x' + Math.round(rect.h) : ''}`;
   if (signature === activeSubSignature) { assSyncAnims(); return; }
 
   if (!topText && !bottomText && !placed.length && !assList.length) {
@@ -850,6 +870,22 @@ function updateSubtitleDisplay() {
   subPosLayer.textContent = '';
   assAnims.length = 0;
   assList.forEach((a) => renderAss(a.info, a.cue, rect, subPosLayer));
+  // lines without their own position that land on the same spot are stacked (bottom ones go up, top ones down)
+  const flow = [...subPosLayer.querySelectorAll('.sub-ass')].filter((_, k) => !assList[k].info.pos && !assList[k].info.mv);
+  for (let i = 1; i < flow.length; i++) {
+    for (let pass = 0; pass < 8; pass++) {
+      const r = flow[i].firstChild.firstChild.firstChild.getBoundingClientRect(); let moved = false;
+      for (let j = 0; j < i; j++) {
+        const o = flow[j].firstChild.firstChild.firstChild.getBoundingClientRect();
+        if (r.left < o.right && r.right > o.left && r.top < o.bottom - 1 && r.bottom > o.top + 1) {
+          const info = assList.filter((x) => !x.info.pos && !x.info.mv)[i].info;
+          const dy = info.an < 7 ? -(r.bottom - o.top + 2) : (o.bottom - r.top + 2);
+          flow[i].style.top = `${parseFloat(flow[i].style.top) + dy}px`; moved = true; break;
+        }
+      }
+      if (!moved) break;
+    }
+  }
   assSyncAnims();
   placed.forEach((p) => {
     const el = document.createElement('span');
