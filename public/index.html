@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Astra Player</title>
-  <link rel="stylesheet" href="style.css?v=261">
+  <link rel="stylesheet" href="style.css?v=270">
   <script>window.open = function() { return null; };</script>
 </head>
 <body>
@@ -127,7 +127,7 @@
 
     <div class="player-wrapper" id="playerWrapper">
       <canvas id="glCanvas" class="gl-viewport aspect-contain"></canvas>
-      <video id="videoElement" playsinline preload="metadata" crossorigin="anonymous" style="display:none;">
+      <video id="videoElement" playsinline disablepictureinpicture disableremoteplayback preload="auto" crossorigin="anonymous" style="display:none;">
         <track id="mainTrack" kind="subtitles" srclang="en" label="Subtitles" default>
       </video>
 
@@ -502,6 +502,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=261"></script>
+  <script src="script.js?v=270"></script>
 </body>
 </html>

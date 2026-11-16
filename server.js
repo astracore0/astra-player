@@ -261,12 +261,17 @@ app.post('/api/settings/root', (req, res) => {
 /* ------------------------------------------------------------------ */
 /* Metadata (ffprobe)                                                  */
 /* ------------------------------------------------------------------ */
+const metaCache = new Map();   // ffprobe results: reopening an episode (or the next one, prefetched) is instant
+function metaCacheSet(k, v) { if (metaCache.size > 300) metaCache.delete(metaCache.keys().next().value); metaCache.set(k, v); }
 app.get('/api/video/metadata', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).json({ error: r.error });
 
   markInteractive(15000);
-  const args = ['-v', 'quiet', '-analyzeduration', '5000000', '-probesize', '5000000', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', r.path];
+  const mkey = `${r.path}|${r.stat.size}|${r.stat.mtimeMs}`;
+  const hit = metaCache.get(mkey);
+  if (hit) { res.set('Cache-Control', 'private, max-age=60'); prefetchSubtitles(r, hit.subtitleTracks); return res.json(hit); }
+  const args = ['-v', 'quiet', '-analyzeduration', '3000000', '-probesize', '3000000', '-print_format', 'json', '-show_streams', '-show_format', '-show_chapters', r.path];
   execFile('ffprobe', args, { maxBuffer: 16 * 1024 * 1024, timeout: 30000 }, (err, stdout) => {
     if (err) {
       return res.json({
@@ -320,7 +325,9 @@ app.get('/api/video/metadata', (req, res) => {
         }
       });
 
-      res.json({ audioTracks, subtitleTracks, is10BitHevc, duration, chapters });
+      const out = { audioTracks, subtitleTracks, is10BitHevc, duration, chapters };
+      if (duration > 0) metaCacheSet(mkey, out);
+      res.json(out);
       prefetchSubtitles(r, subtitleTracks); // background, instant subtitles later
     } catch (e) {
       res.json({ audioTracks: [], subtitleTracks: [], is10BitHevc: false, duration: 0, chapters: [] });
@@ -944,11 +951,11 @@ const QUALITY = {
 function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, hw, legacy }) {
   const q = QUALITY[quality] || QUALITY.balanced;
   // The decoder is the main cost for HEVC: give it real threads, keep some CPU for the encoder.
-  const decodeThreads = Math.max(2, Math.min(4, numCoresEarly));
+  const cores = Math.max(1, numCoresEarly);
   // legacy = plain, conservative input flags (the original behaviour) used as a retry if the fast-start flags fail.
   const a = legacy
     ? ['-v', 'error', '-nostdin']
-    : ['-v', 'error', '-nostdin', '-threads', '2'];   // identical to the v1.3 decoder setup
+    : ['-v', 'error', '-nostdin', '-fflags', '+nobuffer+genpts', '-probesize', '2000000', '-analyzeduration', '1000000', '-threads', String(Math.min(8, cores))];   // decoder: all cores
   a.push('-progress', 'pipe:3', '-nostats');          // live speed= readout (used by the Auto resolution mode)
   if (transcodeVideo && q.skipLoop) a.push('-skip_loop_filter', 'all');   // cheaper HEVC decode at the lowest level
   if (seekSec > 0) a.push('-ss', seekSec.toString());
@@ -959,16 +966,18 @@ function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, h
     if (hw) {
       a.push('-vf', `${scale},format=nv12`, '-c:v', hw, '-b:v', q.hwBitrate, '-g', '30');
     } else {
+      // Speed first: frame-threaded x264 on every core (zerolatency forced slow slice threads), no lookahead/B-frames, full source frame rate.
       a.push('-vf', scale, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', q.preset,
-        '-tune', 'zerolatency', '-crf', String(q.crf), '-g', '30');
+        '-threads', String(Math.min(16, cores)), '-x264-params', 'rc-lookahead=0:sync-lookahead=0:bframes=0:scenecut=0:ref=1:weightp=0:no-deblock=0:cabac=0',
+        '-crf', String(q.crf), '-g', '60', '-keyint_min', '30');
     }
   } else {
     a.push('-c:v', 'copy', '-avoid_negative_ts', 'make_zero');
   }
 
   a.push('-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100',
-    '-max_muxing_queue_size', '1024',
-    '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-');
+    '-max_muxing_queue_size', '1024', '-flush_packets', '1', '-muxdelay', '0', '-muxpreload', '0',
+    '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets', '-');
   return a;
 }
 
@@ -989,6 +998,7 @@ app.get('/stream/transcode', (req, res) => {
   const hwWanted = transcodeVideo && !!HW_ENCODER && req.query.enc === 'hw';
 
   markInteractive(20000);
+  try { req.socket.setNoDelay(true); } catch (e) {}
   killTranscode();
   const jobId = ++transcodeJobId;
   activeTranscodeFile = req.query.file ? String(req.query.file) : '';
@@ -1929,11 +1939,12 @@ app.get('/stream', (req, res) => {
   markInteractive(8000);
   const fileSize = r.stat.size;
   const contentType = CONTENT_TYPES[path.extname(r.path).toLowerCase()] || 'video/mp4';
-  const CHUNK_SIZE = 1024 * 1024 * 4;
+  const CHUNK_SIZE = 1024 * 1024 * 8;
+  try { req.socket.setNoDelay(true); req.socket.setKeepAlive(true, 30000); } catch (e) {}
   const range = req.headers.range;
 
   const pipeFile = (opts) => {
-    const stream = fs.createReadStream(r.path, opts);
+    const stream = fs.createReadStream(r.path, { ...opts, highWaterMark: 1024 * 1024 });   // 1 MB reads: far fewer syscalls than the 64 KB default
     stream.on('error', () => res.destroy());
     res.on('close', () => stream.destroy());
     stream.pipe(res);
@@ -1965,7 +1976,9 @@ app.get('/stream', (req, res) => {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': end - start + 1,
-      'Content-Type': contentType
+      'Content-Type': contentType,
+      'Cache-Control': 'private, max-age=3600',
+      'Last-Modified': new Date(r.stat.mtimeMs).toUTCString()
     });
     pipeFile({ start, end });
   } else {

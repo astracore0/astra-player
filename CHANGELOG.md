@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.18.0 (speed)
+- Direct play (8-bit): 1 MB file reads, 8 MB range chunks, TCP no-delay and cache headers; the video element preloads fully.
+- Web Audio (delay/EQ chain) is built only when you use audio delay or EQ, so plain playback has no extra audio processing.
+- ffprobe results are cached (reopening an episode is instant) and the next episode is prepared 15 s into playback (probe + first MB).
+- Transcoder: decoder and x264 use every CPU core (frame threads instead of slow slice threads), no lookahead/B-frames, CAVLC for cheap phone decoding, full source frame rate (60 fps stays 60), faster start (smaller probe, no mux delay, flush every packet).
+
 ## v1.17.1 (SRT styling)
 - .srt files are read directly (ffmpeg used to merge cues that start together): <font face/size/color>, <b>/<i>/<u> and {\an7-9} now show as written in the file.
 - Syllable-by-syllable subtitles (one tiny cue per letter/syllable) are joined into one line instead of a vertical column.

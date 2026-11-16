@@ -286,8 +286,10 @@ function resumeAudio() {
   document.addEventListener(evt, resumeAudio, { passive: true });
 });
 
-function initWebAudio() {
+// The Web Audio chain (delay + EQ) costs CPU on every audio frame, so it is only built when it is really used.
+function initWebAudio(force) {
   if (audioCtx) { resumeAudio(); return; }
+  if (!force && !currentAudioOffset && !eqBassDb && !eqTrebleDb) return;
   try {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     audioSrcNode = audioCtx.createMediaElementSource(video);
@@ -316,7 +318,7 @@ function initWebAudio() {
 const rngAudioOffset = $('rngAudioOffset');
 if (rngAudioOffset) {
   rngAudioOffset.addEventListener('input', (e) => {
-    initWebAudio();
+    initWebAudio(true);
     currentAudioOffset = parseFloat(e.target.value);
     $('lblAudioOffset').textContent = `${currentAudioOffset > 0 ? '+' : ''}${currentAudioOffset.toFixed(2)}s`;
     if (delayNode) {
@@ -351,7 +353,7 @@ function applyEq(bass, treble, preset) {
 [eqBassSlider, eqTrebleSlider].forEach((slider) => {
   if (!slider) return;
   slider.addEventListener('input', () => {
-    initWebAudio();
+    initWebAudio(true);
     applyEq(eqBassSlider.value, eqTrebleSlider.value, '');
     saveCurrentSettings();
   });
@@ -360,7 +362,7 @@ function applyEq(bass, treble, preset) {
 document.querySelectorAll('[data-eq]').forEach((btn) => {
   btn.onclick = () => {
     const preset = EQ_PRESETS[btn.dataset.eq] || EQ_PRESETS.flat;
-    initWebAudio();
+    initWebAudio(true);
     applyEq(preset[0], preset[1], btn.dataset.eq);
     saveCurrentSettings();
   };
@@ -1025,6 +1027,7 @@ let glReady = false;
 let glDirty = true;
 let currentSharpness = 0.0;
 let displayEl = glCanvas;
+let glFallback = false;
 
 const vsSource = `
   attribute vec2 a_pos;
@@ -1055,7 +1058,7 @@ const fsSource = `
 
 function useVideoFallback() {
   // No usable WebGL: show the <video> element directly (sharpness is unavailable).
-  glReady = false;
+  glReady = false; glFallback = true;
   glCanvas.style.display = 'none';
   video.style.display = 'block';
   video.classList.add('gl-viewport', 'aspect-contain');
@@ -1132,7 +1135,18 @@ function resetFrameWatch() {
 }
 video.addEventListener('loadstart', resetFrameWatch);
 
+// With sharpening off the picture goes straight from the decoder to the screen (no per-frame texture upload),
+// which is what lets 60 fps play without lag; the WebGL canvas is only used while sharpening is on.
+function applyDisplayMode() {
+  const direct = currentSharpness <= 0, f = displayEl.style.filter;
+  if (direct) { video.classList.add('gl-viewport', 'aspect-contain'); video.style.display = 'block'; glCanvas.style.display = 'none'; displayEl = video; }
+  else { video.style.display = 'none'; glCanvas.style.display = 'block'; displayEl = glCanvas; glDirty = true; }
+  displayEl.style.filter = f;
+}
+
 function renderGLFrame() {
+  if (glReady && !glFallback && (currentSharpness <= 0) !== (displayEl === video)) applyDisplayMode();
+  if (displayEl === video) { requestAnimationFrame(renderGLFrame); return; }
   armFrameWatch();
   if (glReady && !document.hidden && video.readyState >= 2 && video.videoWidth > 0) {
     let draw = glDirty;
@@ -1509,6 +1523,20 @@ function playAdjacentEpisode(step, auto = false) {
   inspectMediaAndPlay(next.name, next.relPath || next.fullPath, 0);
 }
 
+// While an episode plays, quietly ready the next one: ffprobe result cached on the server and its first MB read into the OS cache.
+let warmedNext = '';
+function warmNextEpisode() {
+  try {
+    const idx = currentVideoList.findIndex(isActiveItem);
+    const nx = idx === -1 ? null : currentVideoList[idx + 1];
+    const rel = nx && (nx.relPath || nx.fullPath);
+    if (!rel || rel === warmedNext) return;
+    warmedNext = rel;
+    fetch(`/api/video/metadata?file=${encodeURIComponent(rel)}`).catch(() => {});
+    fetch(`/stream?file=${encodeURIComponent(rel)}`, { headers: { Range: 'bytes=0-1048575' } }).then((r) => r.arrayBuffer()).catch(() => {});
+  } catch (e) {}
+}
+
 async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   autoLevel = 0; autoSlowHits = 0;
   const token = ++playToken;
@@ -1626,6 +1654,7 @@ function finalizePlayback(seekTime) {
   initWebAudio();
   setupSubtitleCues();
   loadSavedSettings();
+  initWebAudio();   // only if a saved EQ / audio delay needs it
 
   video.onloadedmetadata = () => {
     video.playbackRate = playbackSpeed;
@@ -1638,6 +1667,7 @@ function finalizePlayback(seekTime) {
     const h = video.videoHeight;
     playerResBadge.textContent = h >= 1080 ? '1080p' : h >= 720 ? '720p' : h > 0 ? `${h}p` : 'Auto';
     updateQualityReadout();
+    setTimeout(warmNextEpisode, 15000);
     if (isTranscodingMode && needBuf() > 0 && !internalPause) { video.pause(); startRebuffer(); }
     else video.play().catch(() => { manualCenterPlay.style.display = 'flex'; });
     resetHideTimer();
