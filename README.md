@@ -1,15 +1,223 @@
 # Astra Player
 
-Astra Player is a lightweight, offline-first media server and web player designed specifically for Android (Termux) and low-resource environments. It indexes local video files and streams them directly to your browser using chunk-based media requests without putting heavy load on memory or CPU.
+A small, offline-first anime / video server and web player. It runs on your phone (Termux), a PC, or GitHub Codespaces, indexes the videos in one folder and plays them in any browser, on the same device or on others (Wi-Fi, tunnel). Light on RAM (30-45 MB idle), heavy lifting (10-bit HEVC, subtitles) is done by ffmpeg and whisper.cpp only when needed.
+
+**Contents:** [Setup](#setup-step-by-step) · [First run](#first-run-5-minutes) · [Sharing with friends](#sharing-with-friends-cloudflare-tunnel) · [Configuration](#configuration-configjson) · [Update / problems](#updating-and-troubleshooting) · [How the key parts work (spoilers)](#how-the-key-parts-work) · [Features](#key-features) · [Reference](#player-guide)
 
 ---
 
-## Quick install
+## Setup step by step
+
+Pick the line that matches your device. Every path ends the same way: the server runs on port **3000** and you open `http://localhost:3000`.
+
+### A. One command (recommended)
+
 ```bash
-# Termux first:  pkg install -y curl git
+# Termux (Android) only - once:  pkg install -y curl git
 curl -fsSL https://raw.githubusercontent.com/astracore0/astra-player/main/setup.sh | bash
 ```
-This clones https://github.com/astracore0/astra-player into ~/astra-player and installs everything (Node, ffmpeg, whisper.cpp + models). Other branch: add `-s -- --branch NAME`. Already cloned? Run `bash setup.sh --update` inside the folder.
+This clones https://github.com/astracore0/astra-player into `~/astra-player`, installs Node.js, ffmpeg and git, runs `npm install`, picks your media folder, builds whisper.cpp with its models (offline AI subtitles) and writes `start.sh`. It can take 10-20 minutes on a phone, mostly the whisper build. Safe to run again.
+
+Then start it:
+```bash
+cd ~/astra-player && bash start.sh
+```
+
+Options (add after `bash` like `... | bash -s -- --no-whisper`, or `bash setup.sh --no-whisper` inside the folder):
+
+| Option | What it does |
+|---|---|
+| `--no-whisper` | Skip whisper.cpp (no offline AI subtitles, setup is much faster) |
+| `--model tiny\|base\|small` | Which AI model to download (bigger = more accurate, slower) |
+| `--media /path` | Your video folder (otherwise it looks for `anime`, `.anime`, `/sdcard`...) |
+| `--port N` | Port written into `start.sh` (default 3000) |
+| `--dir PATH` | Where to clone (default `~/astra-player`) |
+| `--branch NAME` | Branch to clone (default `main`) |
+| `--update` | `git pull` first (run inside the folder) |
+| `--dry-run` | Print what would happen, change nothing |
+
+### B. Per device
+
+<details><summary><b>Android - Termux</b></summary>
+
+1. Install **Termux from F-Droid** (the Play Store version is outdated).
+2. `pkg update && pkg install -y curl git`
+3. Run the one-command line above. Allow the storage popup (setup runs `termux-setup-storage` for you). Your phone storage is then `~/storage/shared` (same as `/sdcard`).
+4. `cd ~/astra-player && bash start.sh` (it holds the wake lock so Android does not kill the server).
+5. Open `http://localhost:3000` in Chrome on the same phone.
+6. Tip: Settings > Preferences > Low-memory mode (Auto) helps weak phones.
+</details>
+
+<details><summary><b>Linux (Debian/Ubuntu, Fedora, Arch, Alpine, openSUSE)</b></summary>
+
+Run the one-command line. The script detects the package manager and uses `sudo` when needed. Videos: put them in `~/Videos/anime` or pass `--media /your/folder`.
+</details>
+
+<details><summary><b>macOS</b></summary>
+
+Needs Homebrew (https://brew.sh). Then run the one-command line. whisper.cpp builds with cmake from brew.
+</details>
+
+<details><summary><b>Windows</b></summary>
+
+Use WSL: in PowerShell `wsl --install`, restart, open **Ubuntu**, run the one-command line there. Your Windows drives are under `/mnt/c/...` (for example `--media /mnt/d/Anime`). Open `http://localhost:3000` in your Windows browser.
+</details>
+
+<details><summary><b>GitHub Codespaces</b></summary>
+
+Open the repo in a Codespace, run `bash setup.sh`, start with `bash start.sh`, then in the **Ports** tab open port 3000. Put test videos in `/workspaces/media` (setup uses it when found).
+</details>
+
+<details><summary><b>Manual install (no script)</b></summary>
+
+```bash
+git clone https://github.com/astracore0/astra-player.git
+cd astra-player
+npm install --omit=dev
+# ffmpeg + ffprobe must be installed (pkg/apt/brew install ffmpeg)
+node server.js
+```
+Environment variables: `PORT` (3000), `HOST` (`0.0.0.0`; `127.0.0.1` keeps it private to this device), `ASTRA_WHISPER_BIN`, `ASTRA_WHISPER_MODEL`, `ASTRA_WHISPER_VAD` (whisper.cpp paths when not auto-found), `ASTRA_HW_ENCODER`, `ASTRA_AI_CHUNK_SEC`.
+</details>
+
+### What gets installed
+
+| Part | Needed for | Required? |
+|---|---|---|
+| Node.js 18+ and `npm install` (only `express`) | the server | yes |
+| ffmpeg + ffprobe | 10-bit/HEVC playback, audio tracks, subtitle extraction, thumbnails | yes |
+| git | clone / update | yes |
+| whisper.cpp + `ggml-*.bin` (+ silero VAD) | offline AI subtitles | optional (`--no-whisper`) |
+| an API key (Groq / OpenAI) | online AI subtitles | optional, Settings |
+
+---
+
+## First run (5 minutes)
+
+1. Start the server and open `http://localhost:3000`.
+2. **Files** (menu) opens your library folder. Wrong folder? Go to the right one and press **Set Default Root**, then **Rescan** on the dashboard.
+3. Folders become series: `Show/Season 1/Episode 01.mkv` shows as Show - Season 1. Files named `S01E02` or `Episode 2` are sorted automatically.
+4. Press a series, pick an episode. Hold or hover any button for a description.
+5. **Settings & Metrics** > Preferences: resolution, pre-buffer, animations, Network mode (online covers).
+6. Subtitles: player gear > Subtitles. Embedded tracks appear by themselves; **Add Subtitle** adds a file; **Make subtitles** creates them with AI.
+
+## Sharing with friends (Cloudflare tunnel)
+
+On your phone/PC, with the server running:
+```bash
+# one-time install:  pkg install cloudflared   (Termux)   |   see developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads
+cloudflared tunnel --url http://localhost:3000
+```
+It prints a `https://xxxx.trycloudflare.com` link. Send it to friends. Everyone who comes in through the tunnel is a **guest**: their own default settings and watch history (saved per browser in `users/`), no access to your library folder setting, API key, caches or tasks, and only files inside the shared library folder. You (localhost / your Wi-Fi) keep one shared owner profile. Stop `cloudflared` to stop sharing. Your upload speed limits how many people can watch (10-bit videos are converted live and need CPU, so keep Auto resolution on).
+
+## Configuration (`config.json`)
+
+Next to `server.js`. Most things are set from the app; edit the file when you need more. Restart the server after editing.
+
+```json
+{
+  "mediaRoot": "/sdcard/.anime",
+  "thumbnails": [
+    { "path": "/sdcard/.anime/youtube/zzz by chiken", "thumbnail": "/sdcard/download/zzz.png" }
+  ],
+  "ai": { "base": "https://api.groq.com/openai/v1", "model": "whisper-large-v3-turbo", "key": "" },
+  "whisper": { "model": "ggml-base.bin", "parallel": 2, "threads": 3 }
+}
+```
+- `mediaRoot` - library folder (also set by **Set Default Root**).
+- `thumbnails` - your own covers, see *Custom thumbnails* below. Android-style `/sdcard/...` paths work.
+- `ai` - online AI subtitles (use the Settings card instead of typing the key here). Keep the file private: it holds the key.
+- `whisper` - advanced: model file, number of parallel workers and threads, `gate`/`snap` (false = turn off silence cutting / snapping).
+
+Other files the server creates: `history.json`, `profile.json` (owner settings), `users/` (guests), `cache/` (thumbnails, covers, converted subtitles), `subtitles/` (AI results).
+
+## Updating and troubleshooting
+
+- Update: `cd ~/astra-player && bash setup.sh --update` (or `git pull && npm install`).
+- **Black screen / no sound on 10-bit video:** it is converted live; lower the resolution in Preferences or leave Auto. First start needs a few seconds head start (pre-buffer).
+- **Library empty:** wrong folder. Files > open the right one > **Set Default Root** > Rescan. On Termux run `termux-setup-storage` and allow the permission.
+- **AI subtitles button disabled:** no whisper.cpp / model and no API key. Run setup without `--no-whisper`, or add a key in Settings.
+- **Android kills the server:** use `bash start.sh` (wake lock) and turn off battery optimisation for Termux.
+- **Port busy:** `PORT=3001 node server.js` or `bash setup.sh --port 3001`.
+- **Cannot reach it from another device:** use the phone's Wi-Fi IP (`http://192.168.x.x:3000`), same network, `HOST` must be `0.0.0.0`.
+
+---
+
+## How the key parts work
+
+Each block below is closed. Click it to see **how it is built** and **why it exists**.
+
+<details><summary><b>Streaming videos (HTTP range, /stream)</b></summary>
+
+**How:** `server.js` answers `GET /stream?file=...` with HTTP 206 partial content. The browser asks for a byte range; the server reads just that part with a 1 MB read buffer and `setNoDelay`. An open-ended request (`bytes=N-`) is served up to 64 MB, so the browser can read far ahead; the browser still applies its own back-pressure.
+
+**Why:** seeking must be instant and a phone must not load a whole 1 GB episode into RAM. Sending only what is asked keeps idle memory at 30-45 MB. A deep buffer ahead is what makes playback smooth on slow storage.
+</details>
+
+<details><summary><b>Live transcoding for 10-bit / HEVC and Auto resolution</b></summary>
+
+**How:** `ffprobe` reads the codec and bit depth (cached in `metaCache`). Browsers cannot play 10-bit HEVC, so the server starts `ffmpeg` and streams a fragmented MP4 (8-bit H.264 + AAC) live. Quality presets (360p ... 720p+, and 1080p / 4K) set height, CRF and encoder speed. Auto mode watches ffmpeg's `speed=` and steps down 720p > 480p > 360p when it drops below real time. Software x264 is the default (most reliable); a hardware encoder is opt-in.
+
+**Why:** most anime releases are 10-bit HEVC and phones' browsers refuse them. Converting only when needed keeps 8-bit files on the cheap direct path. Auto resolution exists because a phone that cannot keep up should lower quality by itself instead of stuttering.
+</details>
+
+<details><summary><b>Pre-buffer in MB and the 5 s head start</b></summary>
+
+**How:** Settings let you give a memory size for 8-bit and for 10-bit videos separately. The player turns MB into seconds with the video's own data rate (`file size / duration`, or the converter's rate) and shows the result under the picker. A custom MB/GB keypad is built in. 8-bit never waits more than 20 s; a converted 10-bit video always keeps at least 5 s.
+
+**Why:** you think in memory, not seconds, and 8-bit is light so it should start at once, while a live conversion needs a head start or it stutters in the first seconds. 1080p / 4K raise the 10-bit value automatically.
+</details>
+
+<details><summary><b>AI subtitles (offline, whisper.cpp)</b></summary>
+
+**How:** the audio track is cut into 2-minute slices (`aiRun`). Each slice is extracted with ffmpeg (band-pass + level normaliser, no denoiser), silence is cut out so whisper cannot loop on gaps, whisper.cpp runs with a voice-activity model (falling back through simpler flag "tiers" for older builds) and timestamps are mapped back. Cues are cleaned (loops, junk, wrong script), merged across slices and cached per slice, so a stopped job resumes. Work starts at the playhead so lines are ready before you reach them. The *Include songs & music scenes* switch skips silence cutting, OP/ED skipping and the voice detector so lyrics and music scenes are read too. Results are cached under a key made from the file, track, language, mode and switches, and exported as readable `.srt/.vtt`.
+
+**Why:** many releases have no subtitles in your language. Doing it on-device keeps it free and private. The chunked, resumable design exists because a phone may be slow or killed by Android mid-way. Songs became a switch because the old denoiser removed music-scene dialogue.
+</details>
+
+<details><summary><b>Online AI subtitles (optional)</b></summary>
+
+**How:** the same slicing pipeline, but each slice is sent as audio to an OpenAI-compatible `/audio/transcriptions` (or `/translations` for English) endpoint and the returned segments become cues. Three slices run at once, 429/5xx are retried with back-off. The key lives only in `config.json`; the page can send a new key but can never read it back, and it is never logged. Guests cannot touch it.
+
+**Why:** a phone may be too slow for whisper. A hosted model (Groq has a free tier) is fast and accurate. It is optional because it needs internet and sends audio out.
+</details>
+
+<details><summary><b>Styled subtitles (ASS / SRT engine)</b></summary>
+
+**How:** the server turns ASS/SSA tags (position, move, fade, transforms, karaoke, rotation, outline, drawings) into markers inside the WebVTT; the browser decodes them and animates with the Web Animations API, locked to the video clock so seeking and pausing stay in sync. SRT files are read directly so overlapping lines and top-positioned lines survive. The subtitle look (font, size, border, background, height) is applied on top for plain dialogue and lifts above the control bar by itself.
+
+**Why:** anime subtitles are often typeset (signs, songs, karaoke). Plain VTT loses all of that; ffmpeg's SRT conversion also merged simultaneous lines.
+</details>
+
+<details><summary><b>Thumbnails, covers and custom thumbnails</b></summary>
+
+**How:** order of choice: your `thumbnails` entry in `config.json` > online cover (Network mode online: AniList, then Jikan, only when the title matches well; YouTube downloads use the video id in the file name) > `cover.jpg`/`folder.jpg`/`poster.jpg` in the folder > one video frame by ffmpeg. All are cached on disk, generated one at a time and never during a live conversion.
+
+**Why:** a library of grey boxes is hard to use, but covers must not slow the phone or need internet by default, so online is opt-in and wrong matches are rejected.
+</details>
+
+<details><summary><b>Per-user profiles and guests</b></summary>
+
+**How:** settings and history sync through `/api/profile` and `/api/history`. Requests that carry proxy headers (Cloudflare, `x-forwarded-for`) are guests: a random cookie id selects `users/<id>.json`, owner-only routes return 403 and file paths outside the library folder are refused. Everything else is the owner profile shared by your own devices.
+
+**Why:** showing the player to friends through a tunnel must not give them your settings, your key or your phone's folders, and their watch history must not mix with yours.
+</details>
+
+<details><summary><b>Low-memory mode and animations off</b></summary>
+
+**How:** Auto = on for devices reporting 2 GB RAM or less, or 4 cores or fewer. It empties the home / history pages while you watch and rebuilds them when you return, unloads a video that has been paused outside the player for 90 s (it reopens at the same second), turns blur/shadow/transitions off and halves the subtitle clock rate. The Animations switch uses the same "no effects" rules.
+
+**Why:** weak phones lag from memory pressure and effects, not only from decoding.
+</details>
+
+<details><summary><b>Files page, Task Manager, deep links</b></summary>
+
+**How:** Files browses folders through `/api/storage/explore` (with suggestions from `/api/storage/suggest`) and starts in your library folder. The Task Manager lists live conversions, AI jobs and online cover downloads with stop/clear. Episode links (`#player/series/season/episode`) reopen an episode on any device.
+
+**Why:** you should be able to see what the phone is busy with, stop it, and pick your folder without typing paths blindly.
+</details>
+
+---
 
 ## Subtitle styling (v1.17)
 ASS/SSA tracks are drawn with their own animation and placement: corners/top/middle/bottom, move, fades, \t transforms, karaoke, rotation, outline/shadow, named fonts and vector drawings (as SVG). Plain dialogue follows your subtitle settings. Embedded fonts and \clip are not supported yet.
@@ -41,63 +249,6 @@ ASS/SSA tracks are drawn with their own animation and placement: corners/top/mid
 | M | Mute | N / P | Next / previous episode |
 | F | Fullscreen | C | Chapter list |
 
----
-
-## One-command setup (setup.sh)
-
-Works on Termux (Android), Debian/Ubuntu, Fedora, Arch, Alpine, openSUSE, macOS (Homebrew), WSL and GitHub Codespaces.
-
-```
-bash setup.sh                 # FULL setup: Node.js, ffmpeg, git, npm packages, media folder, whisper.cpp + tiny/base + voice-detection models
-bash setup.sh --no-whisper    # same without AI subtitles (much faster)
-bash setup.sh --media /path   # choose the media folder
-bash setup.sh --dry-run       # only show what would happen
-bash start.sh                 # start Astra (written by setup.sh)
-```
-
-- **Termux:** run `termux-setup-storage` first (setup.sh does it if needed), then `bash setup.sh`. The start script holds the Termux wake lock.
-- **Codespaces:** run `bash setup.sh`, start with `bash start.sh`, then forward port 3000 in the Ports tab.
-- **Windows:** use WSL (`wsl --install`), then run the script inside Ubuntu.
-- Options: `--port N`, `--model tiny|base|small` (AI model to download). Safe to run again.
-
-## Prerequisites
-
-Node.js, Git and ffmpeg (ffmpeg/ffprobe are needed for subtitles, audio-track switching and transcoding):
-
-    pkg update && pkg install nodejs git ffmpeg -y
-    termux-setup-storage
-
----
-
-## Installation & Setup
-
-1. Clone the repository:
-
-       git clone https://github.com/<your-username>/astra-player.git
-       cd astra-player
-
-2. Install dependencies:
-
-       npm install
-
-3. Start the engine:
-
-       npm start        # or: node server.js
-
-4. Open `http://localhost:3000` in your browser.
-
-Optional environment variables: `PORT` (default 3000) and `HOST` (default `0.0.0.0`; use `127.0.0.1` to keep the server private to the device).
-
----
-
-## Storage Configuration
-
-Astra Player scans directories in this order by default:
-- `~/storage/shared/anime` (or `Anime`)
-- `/sdcard/anime` (or `Anime`, `.anime`)
-- `/sdcard`
-
-To use a different folder, open **Folder Explorer**, navigate to it and tap **Set as Media Root**. Use **Rescan** on the dashboard after adding files.
 
 ---
 
@@ -275,8 +426,4 @@ Give a series folder your own cover in `config.json` (next to server.js). Paths 
 ```
 A custom thumbnail always wins over the online cover and the video frame. png, jpg, webp, gif, avif up to 12 MB. Restart the server (or reload the library) after editing.
 
-## Online AI subtitles (optional)
-Settings > Online AI subtitles: pick Groq (free tier) or OpenAI or any OpenAI-compatible address, paste the API key, Save. In the player menu > Subtitles turn on "Online AI" and press Generate. Without a key everything stays local (whisper.cpp).
 
-## Sharing with friends (Cloudflare tunnel)
-Anyone who comes in through a tunnel is a guest: own settings + history, no access to host settings or files outside the library folder. Open it on your own phone / PC (localhost or Wi-Fi) and you are the owner.
