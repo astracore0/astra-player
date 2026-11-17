@@ -145,7 +145,7 @@ let sessionRestoreDone = false;
 let subsOn = false;
 let subDelay = 0;          // seconds; + = subtitles appear later
 let playbackSpeed = 1;
-const PREF_DEFAULTS = { v: 4, seekStep: 10, quality: 'auto', lite: 'auto', preBuffer: 0, preBufMB8: 0, preBufMB10: 0, autoPlay: true, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
+const PREF_DEFAULTS = { v: 4, networkMode: "offline", thumbQuality: "360p", seekStep: 10, quality: 'auto', lite: 'auto', anim: true, preBuffer: 0, preBufMB8: 0, preBufMB10: 0, autoPlay: true, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
 const prefs = Object.assign({}, PREF_DEFAULTS);
 try {
   const saved = JSON.parse(localStorage.getItem('astra_prefs') || '{}');
@@ -179,7 +179,7 @@ function bufSeconds(mb, tc) {
 function needBuf() {
   const tc = isTranscodingMode && isCurrentFile10Bit;
   const sec = bufSeconds(tc ? prefs.preBufMB10 : prefs.preBufMB8, tc);
-  return tc ? Math.max(5, sec) : sec;
+  return tc ? Math.max(5, sec) : Math.min(sec, 20);            // 8-bit is light: never hold playback back for long
 }
 let startWatch = null;
 let sleepTimerId = null;
@@ -387,14 +387,17 @@ document.querySelectorAll('[data-eq]').forEach((btn) => {
 });
 
 const btnToggleSubStylePanel = $('btnToggleSubStylePanel');
-const subStyleSection = $('subStyleSection');
-if (btnToggleSubStylePanel && subStyleSection) {
-  btnToggleSubStylePanel.onclick = () => {
-    const isHidden = subStyleSection.style.display === 'none';
-    subStyleSection.style.display = isHidden ? 'block' : 'none';
-    btnToggleSubStylePanel.classList.toggle('highlight', isHidden);
-  };
+function setSubStylePage(open) {
+  const m = $('settingsModal'), p = $('subStylePage');
+  if (!m || !p) return;
+  m.classList.toggle('sub-open', open);
+  p.setAttribute('aria-hidden', open ? 'false' : 'true');
+  const body = p.querySelector('.sub-page-body'); if (open && body) body.scrollTop = 0;
 }
+if (btnToggleSubStylePanel) btnToggleSubStylePanel.onclick = () => setSubStylePage(true);
+$('subStyleBack').onclick = () => setSubStylePage(false);
+// Closing the menu always returns it to the main tabs
+new MutationObserver(() => { if (!$('settingsModal').classList.contains('open')) setSubStylePage(false); }).observe($('settingsModal'), { attributes: true, attributeFilter: ['class'] });
 
 /* ------------------------------------------------------------------ */
 /* Playback state / history sync                                       */
@@ -1408,18 +1411,31 @@ function handleDoubleTap(side) {
     }
     resetHideTimer();
     tapTracker[side] = 0;
+  } else if (video.paused) {
+    // Instant 0ms HUD toggle when paused
+    tapTracker[side] = 0;
+    const isHidden = topOverlay.classList.contains('hidden');
+    if (isHidden) {
+      resetHideTimer();
+    } else {
+      clearTimeout(hideTimer);
+      topOverlay.classList.add('hidden');
+      bottomOverlay.classList.add('hidden');
+      playerWrapper.classList.add('hud-hidden');
+    }
   } else {
     tapTracker[side] = now;
     setTimeout(() => {
-      if (Date.now() - tapTracker[side] >= 270 && tapTracker[side] !== 0) {
+      if (Date.now() - tapTracker[side] >= 210 && tapTracker[side] !== 0) {
         const isHidden = topOverlay.classList.contains('hidden');
         if (isHidden) resetHideTimer();
         else {
           topOverlay.classList.add('hidden');
           bottomOverlay.classList.add('hidden');
+          playerWrapper.classList.add('hud-hidden');
         }
       }
-    }, 280);
+    }, 220);
   }
 }
 
@@ -1601,6 +1617,7 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
 
   // Fresh state for the new file (nothing may leak over from the previous episode).
   activeVideoPath = relPath;
+  updatePlayerEmptyState();
   setChapters([]);
   nativeFallbackTried = false;
   compatMode = false;
@@ -1634,6 +1651,7 @@ async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
   renderInlinePlaylist();
   updateMediaSession();
   syncDeepLink(relPath);
+  syncOnlineArtworkForActive();
 
   probeLoadingText.textContent = 'Scanning audio & subtitles...';
   playerBufferingIndicator.classList.add('show');
@@ -2096,15 +2114,15 @@ function resetHideTimer() {
 
   topOverlay.classList.remove('hidden');
   bottomOverlay.classList.remove('hidden');
+  playerWrapper.classList.remove('hud-hidden');
   clearTimeout(hideTimer);
 
-  if (!video.paused) {
-    hideTimer = setTimeout(() => {
-      if (settingsModal.classList.contains('open') || playerEpisodesDrawer.classList.contains('open') || $('chaptersPanel').classList.contains('open')) return;
-      topOverlay.classList.add('hidden');
-      bottomOverlay.classList.add('hidden');
-    }, 5000);
-  }
+  hideTimer = setTimeout(() => {
+    if (settingsModal.classList.contains('open') || playerEpisodesDrawer.classList.contains('open') || $('chaptersPanel').classList.contains('open')) return;
+    topOverlay.classList.add('hidden');
+    bottomOverlay.classList.add('hidden');
+    playerWrapper.classList.add('hud-hidden');
+  }, 5000);
 }
 
 // Touch taps on the video are handled by the tap zones (show/hide toggle). If the wrapper also
@@ -2174,6 +2192,92 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+
+/* ===== v1.25 Card Format (Title • S0E0 | + Description) & Long-Press Video Info ===== */
+function formatCardHeader(item) {
+  const name = typeof item === "string" ? item : (item.name || "");
+  const p = parseMedia(name);
+  const pad = (n) => String(n).padStart(2, "0");
+  const tag = p.ep == null ? "" : (p.season != null ? `S${pad(p.season)}E${pad(p.ep)}` : `E${pad(p.ep)}`);
+  return { title: p.title || cleanMediaTitle(name), tag };
+}
+
+function getCardDescription(item) {
+  if (!item || typeof item === "string") return "Local media stream";
+  const parts = [];
+  const p = parseMedia(item.name || "");
+  if (p.tags && p.tags.length) parts.push(p.tags.slice(0, 2).join(" · "));
+  if (item.size) parts.push(item.size);
+  const prog = progressLabel(item);
+  if (prog) parts.push(prog);
+  return parts.length ? parts.join(" • ") : "Ready to play";
+}
+
+function showVideoInfoPopup(item, folderHint) {
+  const old = document.getElementById("astraVidInfoModal");
+  if (old) old.remove();
+  const rel = item.relPath || item.fullPath || "";
+  const name = item.name || rel.split("/").pop() || "Video";
+  const { title, tag } = formatCardHeader(item);
+  const h = historyCache[rel] || historyCache[item.fullPath] || null;
+  const progStr = h && h.dur ? `${formatTime(h.time)} / ${formatTime(h.dur)} (${h.percent || 0}%)` : "Not watched yet";
+  const folder = folderHint || findFolderForPath(rel, name) || "Storage";
+
+  const host = document.fullscreenElement || document.body;
+  const scrim = document.createElement("div");
+  scrim.id = "astraVidInfoModal";
+  scrim.className = "dlg-scrim";
+  scrim.innerHTML = `
+    <div class="dlg vid-info-dlg" role="dialog" aria-modal="true">
+      <div class="vid-info-thumb history-thumb"></div>
+      <div class="vid-info-head">
+        <span class="vid-info-title">${escapeHtml(title)}</span>
+        ${tag ? `<span class="vid-info-tag">• ${escapeHtml(tag)} |</span>` : ""}
+      </div>
+      <p class="vid-info-desc">${escapeHtml(getCardDescription(item))}</p>
+      <div class="vid-info-grid">
+        <div><b>Folder:</b> <span>${escapeHtml(folder)}</span></div>
+        <div><b>File:</b> <span>${escapeHtml(name)}</span></div>
+        <div><b>Progress:</b> <span>${escapeHtml(progStr)}</span></div>
+      </div>
+      <div class="dlg-act" style="margin-top:14px;">
+        <button type="button" class="pill-btn vi-close">Close</button>
+        <button type="button" class="pill-btn highlight vi-play">Play Video</button>
+      </div>
+    </div>`;
+  const close = () => { scrim.classList.remove("on"); setTimeout(() => scrim.remove(), 160); };
+  scrim.querySelector(".vi-close").onclick = close;
+  scrim.querySelector(".vi-play").onclick = () => {
+    close();
+    inspectMediaAndPlay(name, rel, h ? resumeStartTime(h) : 0);
+    navigateTo("player");
+  };
+  scrim.addEventListener("pointerdown", (e) => { if (e.target === scrim) close(); });
+  host.appendChild(scrim);
+  attachThumb(scrim.querySelector(".vid-info-thumb"), rel, "video", name);
+  requestAnimationFrame(() => scrim.classList.add("on"));
+}
+
+function bindHoldVideoInfo(el, item, folderHint) {
+  let holdTimer = null, moved = false, held = false;
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button && e.button !== 0) return;
+    moved = false; held = false;
+    holdTimer = setTimeout(() => {
+      held = true;
+      if (navigator.vibrate) try { navigator.vibrate(25); } catch (_) {}
+      showVideoInfoPopup(item, folderHint);
+    }, 520);
+  });
+  el.addEventListener("pointermove", () => { moved = true; clearTimeout(holdTimer); });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((ev) => {
+    el.addEventListener(ev, () => clearTimeout(holdTimer));
+  });
+  el.addEventListener("click", (e) => {
+    if (held) { e.preventDefault(); e.stopImmediatePropagation(); held = false; }
+  }, true);
+}
+
 /* ------------------------------------------------------------------ */
 /* Episode lists                                                       */
 /* ------------------------------------------------------------------ */
@@ -2191,6 +2295,10 @@ function subLine(item) {
 
 function renderFloatingEpisodes() {
   episodesDrawerList.innerHTML = '';
+  const pBtn = $("prevEpBtn"), nBtn = $("nextEpBtn");
+  const activeIdx = currentVideoList.findIndex(isActiveItem);
+  if (pBtn) pBtn.disabled = activeIdx <= 0;
+  if (nBtn) nBtn.disabled = activeIdx < 0 || activeIdx >= currentVideoList.length - 1;
   if (currentVideoList.length === 0) {
     episodesDrawerList.innerHTML = '<div class="empty-hint">No queue active. Pick a series from dashboard!</div>';
     return;
@@ -2198,14 +2306,26 @@ function renderFloatingEpisodes() {
   currentVideoList.forEach((item) => {
     const row = document.createElement('div');
     const isPlaying = isActiveItem(item);
-    row.className = `drawer-ep-row ${isPlaying ? 'active' : ''}`;
-    row.innerHTML = `<div><div class="drawer-ep-title">${escapeHtml(cleanMediaTitle(item.name))}</div><div class="drawer-ep-sub">${subLine(item)}</div></div>`;
+    const rel = item.relPath || item.fullPath;
+    const h = historyCache[item.relPath] || historyCache[item.fullPath];
+    const pct = h ? Math.min(100, Number(h.percent) || 0) : 0;
+    row.className = `drawer-ep-row drawer-ep-card ${isPlaying ? 'active' : ''}`;
+    row.innerHTML = `
+      <div class="drawer-ep-thumb history-thumb">${pct > 0 ? `<div class="history-bar" style="width:${pct}%"></div>` : ''}</div>
+      <div class="drawer-ep-meta">
+        <div class="drawer-ep-top">
+          ${isPlaying ? '<span class="watching-pill">WATCHING</span>' : ''}
+          <div class="drawer-ep-title">${escapeHtml(cleanMediaTitle(item.name))}</div>
+        </div>
+        <div class="drawer-ep-sub">${subLine(item)}</div>
+      </div>`;
     row.onclick = () => {
-      inspectMediaAndPlay(item.name, item.relPath || item.fullPath, 0);
+      inspectMediaAndPlay(item.name, rel, 0);
       playerEpisodesDrawer.classList.remove('open');
       renderInlinePlaylist();
     };
     episodesDrawerList.appendChild(row);
+    attachThumb(row.querySelector('.drawer-ep-thumb'), rel, 'video', item.name);
   });
 }
 
@@ -2229,54 +2349,81 @@ function seasonLabel(key) {
   const m = /^(?:s|season)\s*0*(\d+)$/i.exec(last.trim());
   return m ? `Season ${m[1]}` : last;
 }
+var IC_FILM = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="M7 3v18M17 3v18M2 9h5M17 9h5M2 15h5M17 15h5"/></svg>';
+var IC_SEASON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>';
+function updatePlayerEmptyState() {
+  const w = $('playerWrapper');
+  if (w) w.classList.toggle('no-video', !activeVideoPath);
+}
+// "The Eminence in Shadow / The Eminence in Shadow S01" -> { name: "The Eminence in Shadow", label: "Season 1" }
+function seasonInfo(key) {
+  const tokens = key.split(' / '), last = tokens[tokens.length - 1] || '';
+  const m = /(?:season|\bs)[\s._-]*0*(\d{1,2})\b/i.exec(last);
+  return { name: tokens[0] || last, label: m ? `Season ${+m[1]}` : last };
+}
+// Card text: title, plus S1E2 only when the file name really has it ("E5" when only the episode is known)
+function epCardParts(item) {
+  const p = parseMedia(item.name || '');
+  const tag = p.ep == null ? '' : (p.season != null ? `S${p.season}E${p.ep}` : `E${p.ep}`);
+  return { title: p.title || cleanMediaTitle(item.name), tag };
+}
 function renderInlinePlaylist() {
+  updatePlayerEmptyState();
   playerInlinePlaylist.innerHTML = '';
+  const seasonSlot = $('playerSeasons'); seasonSlot.innerHTML = '';
   if (currentVideoList.length === 0) {
     playerInlinePlaylist.innerHTML = '<div class="empty-hint">Select a series to view episodes</div>';
     return;
   }
-  playerShelfTitle.textContent = currentPathTokens.join(' / ') || 'Active Queue';
-  const head = playerShelfTitle.parentNode;
-  if (!head.querySelector('.q-layout')) {
-    const g = document.createElement('div'); g.className = 'q-layout seg';
-    g.innerHTML = '<button class="chip-preset" data-ql="h" data-tip="Side by side (swipe)" data-tip-pos="b r">↔</button><button class="chip-preset" data-ql="v" data-tip="All episodes" data-tip-pos="b r">↕</button>';
-    g.onclick = (e) => { const bt = e.target.closest('[data-ql]'); if (!bt) return; prefs.queueLayout = bt.dataset.ql; savePrefs(); renderInlinePlaylist(); };
-    head.appendChild(g);
+  const n = currentVideoList.length;
+  playerShelfTitle.innerHTML = IC_FILM + '<span></span><small></small>';
+  playerShelfTitle.querySelector('span').textContent = currentPathTokens[0] || 'Active Queue';
+  playerShelfTitle.querySelector('small').textContent = `${n} ${n === 1 ? 'video' : 'videos'}`;
+
+  // Season boxes: series name (bigger) over "Season N" (smaller), scrolling sideways
+  const seasons = seasonSiblings();
+  if (seasons.length > 0) {
+    const row = document.createElement('div'); row.className = 'season-row';
+    const here = currentPathTokens.join(' / ');
+    seasons.forEach((k) => {
+      const info = seasonInfo(k);
+      const bt = document.createElement('button');
+      bt.className = 'season-box' + (k === here ? ' active' : '');
+      bt.innerHTML = '<span class="sb-name"></span><span class="sb-sub">' + IC_SEASON + '<span></span></span>';
+      bt.querySelector('.sb-name').textContent = info.name;
+      bt.querySelector('.sb-sub span').textContent = info.label;
+      bt.title = `${info.name} \u00b7 ${info.label}`;
+      bt.onclick = () => { currentPathTokens = k.split(' / '); currentVideoList = fullLibrary[k]; renderInlinePlaylist(); renderFloatingEpisodes(); };
+      row.appendChild(bt);
+    });
+    seasonSlot.appendChild(row);
+    const on = row.querySelector('.active'); if (on) requestAnimationFrame(() => { row.scrollLeft = Math.max(0, on.offsetLeft - 16); });
   }
-  const layout = prefs.queueLayout === 'v' ? 'v' : 'h';
-  head.querySelectorAll('[data-ql]').forEach((x) => x.classList.toggle('active', x.dataset.ql === layout));
 
   const list = document.createElement('div');
-  list.className = `q-list ${layout === 'v' ? 'q-v' : 'q-h'}`;
+  list.className = 'q-list q-v';
   currentVideoList.forEach((item) => {
     const isPlaying = isActiveItem(item);
     const rel = item.relPath || item.fullPath;
+    const { title, tag } = formatCardHeader(item);
+    const desc = getCardDescription(item);
     const card = document.createElement('div');
-    card.className = `q-card${isPlaying ? ' playing' : ''}`;
-    card.innerHTML = `<div class="q-thumb history-thumb">${isPlaying ? '<span class="q-now">Playing</span>' : ''}</div><div class="q-name"></div>`;
-    card.querySelector('.q-name').textContent = epCardLabel(item);
+    card.className = `q-card bordered-media-card${isPlaying ? ' playing' : ''}`;
+    card.innerHTML = `
+      <div class="q-thumb history-thumb">${isPlaying ? '<span class="q-now"><i></i><i></i><i></i>Playing</span>' : ''}</div>
+      <div class="media-card-body">
+        <div class="q-name"><span class="q-title"></span>${tag ? `<span class="q-ep">• ${escapeHtml(tag)} |</span>` : ''}</div>
+        <div class="media-card-desc"></div>
+      </div>`;
+    card.querySelector('.q-title').textContent = title;
+    card.querySelector('.media-card-desc').textContent = desc;
     card.title = cleanMediaTitle(item.name);
     card.onclick = () => { inspectMediaAndPlay(item.name, rel, 0); renderInlinePlaylist(); };
+    bindHoldVideoInfo(card, item, currentPathTokens.join(" / "));
     list.appendChild(card);
     attachThumb(card.querySelector('.q-thumb'), rel, 'video', item.name);
   });
   playerInlinePlaylist.appendChild(list);
-  const playingCard = list.querySelector('.playing');
-  if (playingCard && layout === 'h') requestAnimationFrame(() => { list.scrollLeft = Math.max(0, playingCard.offsetLeft - 4); });
-
-  const seasons = seasonSiblings();
-  if (seasons.length > 1) {
-    const row = document.createElement('div'); row.className = 'q-seasons';
-    const here = currentPathTokens.join(' / ');
-    seasons.forEach((k) => {
-      const bt = document.createElement('button');
-      bt.className = 'chip-preset' + (k === here ? ' active' : '');
-      bt.textContent = seasonLabel(k);
-      bt.onclick = () => { currentPathTokens = k.split(' / '); currentVideoList = fullLibrary[k]; renderInlinePlaylist(); renderFloatingEpisodes(); };
-      row.appendChild(bt);
-    });
-    playerInlinePlaylist.appendChild(row);
-  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2373,22 +2520,39 @@ async function exploreFolder(dirPath = '') {
 
     data.files.forEach((f) => {
       const row = document.createElement('div');
-      row.className = 'explorer-row';
-      row.innerHTML = `
-        <div class="row-left">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="${f.type === 'video' ? '#10b981' : '#f59e0b'}"><polygon points="6 4 20 12 6 20 6 4"/></svg>
-          <div class="row-title">${escapeHtml(cleanMediaTitle(f.name))}</div>
-        </div>
-        <span class="row-badge">${f.type === 'video' ? 'Play' : 'Attach'}</span>
-      `;
+      const isVid = f.type === 'video';
+      const { title, tag } = formatCardHeader(f.name);
+      row.className = isVid ? 'explorer-row explorer-video-card bordered-media-card' : 'explorer-row';
+      if (isVid) {
+        row.innerHTML = `
+          <div class="exp-vid-thumb history-thumb"></div>
+          <div class="media-card-body exp-vid-body">
+            <div class="q-name"><span class="q-title">${escapeHtml(title)}</span>${tag ? `<span class="q-ep">• ${escapeHtml(tag)} |</span>` : ''}</div>
+            <div class="media-card-desc">${escapeHtml(getCardDescription(f))}</div>
+          </div>
+          <span class="row-badge">Play</span>
+        `;
+      } else {
+        row.innerHTML = `
+          <div class="row-left">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#f59e0b"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+            <div class="row-title">${escapeHtml(cleanMediaTitle(f.name))}</div>
+          </div>
+          <span class="row-badge">Attach</span>
+        `;
+      }
       row.onclick = () => {
-        if (f.type === 'video') {
+        if (isVid) {
           playFromExplorer(f, videosHere, data.current);
         } else {
           addExternalSubtitle(f.name, f.fullPath);
           showToast(`Subtitle attached: ${f.name}`, 2000);
         }
       };
+      if (isVid) {
+        bindHoldVideoInfo(row, f, data.current);
+        attachThumb(row.querySelector('.exp-vid-thumb'), f.relPath || f.fullPath, 'video', f.name);
+      }
       container.appendChild(row);
     });
 
@@ -2452,6 +2616,7 @@ $('btnSetAsMediaRoot').onclick = async () => {
     if (data.success) {
       libraryRoot = data.root;
       fullLibrary = data.library || {};
+      await loadCustomThumbs();
       renderDashboard();
       renderHistory();
       const eps = Object.values(fullLibrary).reduce((n, list) => n + list.length, 0);
@@ -2686,6 +2851,7 @@ async function loadLibrary(refresh = false) {
     const data = await res.json();
     fullLibrary = data.library || {};
     libraryRoot = data.root || '';
+    await loadCustomThumbs();
     renderDashboard();
     await renderHistory();
   } catch (e) {
@@ -2729,12 +2895,19 @@ function renderDashboard(query = '') {
     if (q && !matchFolder && !matchEp) return;
     shown++;
 
+    const firstEp = eps[0];
+    const sMatch = /(?:season|\bs)[\s._-]*0*(\d{1,2})\b/i.exec(folder);
+    const seriesTag = sMatch ? `S${Number(sMatch[1])}` : "Playlist";
+    const seriesDisplayName = cleanSeriesQuery(folder) || cleanMediaTitle(folder);
     const card = document.createElement('div');
-    card.className = 'anime-deck-card';
+    card.className = 'anime-deck-card bordered-media-card';
+    const isYtFolder = /^youtube$|^downloads$|^videos$|^telegram$/i.test(seriesDisplayName);
     card.innerHTML = `
-      <div class="deck-thumb"></div>
-      <h4 class="deck-title">${escapeHtml(cleanMediaTitle(folder))}</h4>
-      <span class="deck-sub">${eps.length} Episodes</span>
+      <div class="deck-thumb">${isYtFolder ? `<span class="youtube-folder-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg> YouTube</span>` : ''}</div>
+      <div class="media-card-body">
+        <div class="q-name"><span class="q-title">${escapeHtml(seriesDisplayName)}</span><span class="q-ep">• ${escapeHtml(isYtFolder ? "Playlist" : seriesTag)} |</span></div>
+        <div class="media-card-desc">${eps.length} Episodes • ${prefs.networkMode === "online" && !isYtFolder ? "Online Cover" : "Local Series"}</div>
+      </div>
     `;
     card.onclick = () => {
       currentPathTokens = folder === 'Anime Root' ? [] : folder.split(' / ');
@@ -2744,8 +2917,9 @@ function renderDashboard(query = '') {
       inspectMediaAndPlay(start.ep.name, start.ep.relPath || start.ep.fullPath, start.time);
       navigateTo('player');
     };
+    bindHoldVideoInfo(card, firstEp, folder);
     seriesCardsGrid.appendChild(card);
-    attachThumb(card.querySelector('.deck-thumb'), eps[0].relPath || eps[0].fullPath, 'series', folder);
+    attachThumb(card.querySelector('.deck-thumb'), firstEp.relPath || firstEp.fullPath, 'series', folder);
   });
 
   if (shown === 0) {
@@ -2801,14 +2975,18 @@ async function renderHistory() {
 
     // One horizontal row, left to right: the episode you were on, then its Next / Next 2 / Next 3, then the other shows.
     const mkCard = (name, k, html, onPlay, label) => {
+      const { title, tag } = formatCardHeader(name);
       const card = document.createElement('div');
-      card.className = 'history-deck-card' + (label ? ' is-next' : '');
+      card.className = 'history-deck-card bordered-media-card' + (label ? ' is-next' : '');
       card.innerHTML = `
         <div class="history-thumb">${label ? `<span class="hist-tag">${label}</span>` : ''}${html.bar || ''}</div>
-        <div class="history-name">${escapeHtml(cleanMediaTitle(name))}</div>
-        <div class="history-time-tag">${html.sub}</div>
-        <button class="pill-btn highlight mini" style="margin-top:6px;">${label ? 'Play' : 'Resume'}</button>`;
+        <div class="media-card-body">
+          <div class="q-name"><span class="q-title">${escapeHtml(title)}</span>${tag ? `<span class="q-ep">• ${escapeHtml(tag)} |</span>` : ''}</div>
+          <div class="media-card-desc">${html.sub}</div>
+          <button class="pill-btn highlight mini" style="margin-top:6px;">${label ? 'Play' : 'Resume'}</button>
+        </div>`;
       card.querySelector('button').onclick = onPlay;
+      bindHoldVideoInfo(card, { name, relPath: k, fullPath: k });
       historyGrid.appendChild(card);
       attachThumb(card.querySelector('.history-thumb'), k, 'video', name);
     };
@@ -2832,7 +3010,7 @@ async function renderHistory() {
 }
 
 async function clearHistory() {
-  if (!window.confirm('Clear all watch history?')) return;
+  if (!(await astraConfirm('All saved watch progress will be removed.', { title: 'Clear watch history?', ok: 'Clear', danger: true }))) return;
   try {
     await fetch('/api/history/clear', { method: 'POST' });
   } catch (e) {
@@ -3029,6 +3207,73 @@ setInterval(async () => {
   } catch (e) {}
 }, 2500);
 
+
+/* ===== v1.26.1 Online Original Covers, Task Reporting & Ambient Background ===== */
+const onlineMetaCache = new Map();
+
+function cleanSeriesQuery(raw) {
+  const firstPart = String(raw || "").split("/")[0].trim();
+  const noSeason = firstPart.replace(/\b(season|s)\s*0*\d+\b/gi, "").trim();
+  return parseMedia(noSeason || firstPart).title || noSeason || firstPart;
+}
+
+async function fetchOnlineArtwork(rawTitle) {
+  if (prefs.networkMode !== "online" || !rawTitle) return null;
+  const title = cleanSeriesQuery(rawTitle);
+  const q = prefs.thumbQuality || "360p";
+  const key = `${title.toLowerCase()}|${q}`;
+  if (onlineMetaCache.has(key)) return onlineMetaCache.get(key);
+  try {
+    const res = await fetch(`/api/meta/online?title=${encodeURIComponent(title)}&q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (data && data.error) {
+      showToast(`Online cover error: ${data.error}`, 3000);
+    }
+    onlineMetaCache.set(key, data && data.found ? data : null);
+    return onlineMetaCache.get(key);
+  } catch (e) {
+    showToast("Online cover fetch failed (check internet)", 3000);
+    return null;
+  }
+}
+
+function applyAmbientBackground(imgUrl) {
+  const bg = $("astraAmbientBg");
+  const hero = $("heroBanner");
+  const pw = $("playerWrapper");
+  const active = !!imgUrl && prefs.networkMode === "online";
+  if (bg) {
+    bg.style.backgroundImage = active ? `url("${imgUrl}")` : "";
+    bg.classList.toggle("active", active);
+  }
+  if (hero) {
+    if (active) {
+      hero.style.backgroundImage = `linear-gradient(90deg, rgba(18,24,36,0.92) 30%, rgba(18,24,36,0.62) 100%), url("${imgUrl}")`;
+      hero.style.backgroundSize = "cover";
+      hero.style.backgroundPosition = "center";
+    } else {
+      hero.style.backgroundImage = "";
+    }
+  }
+  if (pw) {
+    pw.style.boxShadow = active ? "0 12px 40px rgba(37, 99, 235, 0.28)" : "";
+  }
+}
+
+async function syncOnlineArtworkForActive() {
+  if (prefs.networkMode !== "online" || !activeVideoPath) {
+    applyAmbientBackground("");
+    return;
+  }
+  const seriesName = currentPathTokens[0] || activeVideoPath.split("/").pop() || "";
+  const meta = await fetchOnlineArtwork(seriesName);
+  if (meta && meta.found && meta.localUrl) {
+    applyAmbientBackground(meta.localUrl);
+  } else {
+    applyAmbientBackground("");
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Thumbnails (lazy, 2 at a time, cached in memory + server disk)      */
 /* ------------------------------------------------------------------ */
@@ -3073,10 +3318,35 @@ async function loadThumb(job) {
     el.classList.add('has-img');
   }
 }
+let customThumbKeys = new Set(), customThumbStamp = Date.now();
+function loadCustomThumbs() {
+  return fetch('/api/thumbs/custom').then((r) => r.json()).then((d) => { customThumbKeys = new Set(d.keys || []); customThumbStamp = Date.now(); }).catch(() => {});
+}
 function attachThumb(el, file, kind, label) {
   if (!el) return;
   el.dataset.initial = (cleanMediaTitle(label || '').trim()[0] || '▶').toUpperCase();
   if (!prefs.thumbs || !file) return;
+  if (kind === "series" && label && customThumbKeys.has(label)) {
+    // custom thumbnail from config.json always wins
+    const u = "/api/thumb/custom?key=" + encodeURIComponent(label) + "&v=" + customThumbStamp;
+    el.style.backgroundImage = `url("${u}")`; el.classList.add("has-img");
+    return;
+  }
+  if (prefs.networkMode === "online" && kind === "series" && label) {
+    const seriesHint = label;
+    fetchOnlineArtwork(seriesHint).then((meta) => {
+      if (meta && meta.found && meta.localUrl && el.isConnected) {
+        el.style.backgroundImage = `url("${meta.localUrl}")`;
+        el.classList.add("has-img");
+        if (kind === "series") applyAmbientBackground(meta.localUrl);
+        return;
+      }
+      el._thumbJob = { el, file, kind };
+      if (thumbObserver) thumbObserver.observe(el);
+      else { thumbQueue.push(el._thumbJob); pumpThumbs(); }
+    });
+    return;
+  }
   el._thumbJob = { el, file, kind };
   if (thumbObserver) thumbObserver.observe(el);
   else { thumbQueue.push(el._thumbJob); pumpThumbs(); }
@@ -3108,7 +3378,32 @@ function initPrefsPanel() {
     if (el.type === 'checkbox') { el.checked = !!prefs[key]; el.onchange = () => { prefs[key] = el.checked; savePrefs(); }; }
     else { el.value = String(prefs[key]); el.onchange = () => { prefs[key] = num ? Number(el.value) : el.value; savePrefs(); }; }
   };
-  bind('prefSeek', 'seekStep', true); bind('prefQuality', 'quality'); bind('prefAutoPlay', 'autoPlay'); bind('prefLite', 'lite');
+  bind('prefSeek', 'seekStep', true);
+  bind('prefNetworkMode', 'networkMode');
+  const syncNetUi = () => {
+    const r = $("rowThumbQuality");
+    if (r) r.style.display = prefs.networkMode === "online" ? "" : "none";
+  };
+  syncNetUi();
+  bind('prefThumbQuality', 'thumbQuality');
+  const tqSel = $("prefThumbQuality");
+  if (tqSel) tqSel.addEventListener("change", () => {
+    onlineMetaCache.clear();
+    renderDashboard();
+    renderHistory();
+    if (activeVideoPath) syncOnlineArtworkForActive();
+    showToast(`Online thumbnail quality: ${prefs.thumbQuality}`, 1800);
+  });
+  const netSel = $("prefNetworkMode");
+  if (netSel) netSel.addEventListener("change", () => {
+    syncNetUi();
+    onlineMetaCache.clear();
+    applyAmbientBackground("");
+    renderDashboard();
+    renderHistory();
+    if (activeVideoPath) syncOnlineArtworkForActive();
+    showToast(prefs.networkMode === "online" ? "Online mode: fetching original thumbnails & backgrounds" : "Offline mode: local media only", 2400);
+  }); bind('prefQuality', 'quality'); bind('prefAutoPlay', 'autoPlay'); bind('prefLite', 'lite');
   bind('prefAutoSkip', 'autoSkip'); bind('prefFsRotate', 'fsRotate'); bind('prefAutoNext', 'autoNext');
   bind('prefHw', 'hwEnc');
   bind('prefFsFill', 'fsFill'); $('prefFsFill').addEventListener('change', applyFill); applyFill();
@@ -3136,9 +3431,10 @@ initPrefsPanel();
 /* ------------------------------------------------------------------ */
 const aiUi = {
   box: $('aiBox'), state: $('aiState'), bar: $('aiBar'), prog: $('aiProgress'), hint: $('aiHint'), chip: $('aiChip'),
-  gen: $('aiGenBtn'), all: $('aiGenAllBtn'), cancel: $('aiCancelBtn'), lang: $('aiLang'), tr: $('aiTranslate'), songs: $('aiSongs'), files: $('aiFiles')
+  gen: $('aiGenBtn'), all: $('aiGenAllBtn'), cancel: $('aiCancelBtn'), lang: $('aiLang'), tr: $('aiTranslate'), songs: $('aiSongs'), online: $('aiOnline'), files: $('aiFiles')
 };
-let aiMode = 'quick';
+let aiMode = 'quick', aiLocal = true;
+const AI_ONLINE_SAVE = 'astra_ai_online';
 let aiVad = true;
 const AI_MODE_TEXT = {
   quick: 'Quick: smallest model, only the speech is read. Fast, but it can mishear or miss words.',
@@ -3160,7 +3456,7 @@ let aiLastCues = -1;
 
 function aiQuery(file) {
   return `file=${encodeURIComponent(file)}&audioTrack=${encodeURIComponent(activeAudioStreamIndex)}`
-    + `&lang=${aiUi.lang.value}&translate=${aiUi.tr.checked ? 1 : 0}&mode=${aiMode}&songs=${aiUi.songs.checked ? 1 : 0}`;
+    + `&lang=${aiUi.lang.value}&translate=${aiUi.tr.checked ? 1 : 0}&mode=${aiMode}&songs=${aiUi.songs.checked ? 1 : 0}${aiUi.online.checked ? '&online=1' : ''}`;
 }
 const aiMeta = document.createElement('div'); aiMeta.className = 'ai-meta';
 const aiLive = document.createElement('div'); aiLive.className = 'ai-live';
@@ -3252,7 +3548,7 @@ function aiStartPolling(file) {
 async function aiGenerate(file, priority) {
   const res = await fetch('/api/ai/subs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, songs: aiUi.songs.checked, mode: aiMode, priority: !!priority, from: priority ? Math.floor(absoluteTime() || 0) : 0 })
+    body: JSON.stringify({ file, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, songs: aiUi.songs.checked, online: aiUi.online.checked, mode: aiMode, priority: !!priority, from: priority ? Math.floor(absoluteTime() || 0) : 0 })
   });
   return res.json();
 }
@@ -3282,7 +3578,7 @@ aiUi.cancel.onclick = async () => {
   clearInterval(aiPoll);
   aiCheck(activeVideoPath, false);
 };
-[aiUi.lang, aiUi.tr, aiUi.songs].forEach((el) => el.addEventListener('change', () => { if (activeVideoPath) aiCheck(activeVideoPath, false); }));
+[aiUi.lang, aiUi.tr, aiUi.songs, aiUi.online].forEach((el) => el.addEventListener('change', () => { if (activeVideoPath) aiCheck(activeVideoPath, false); }));
 async function aiLoadExisting(path) {
   try {
     const d = await (await fetch(`/api/ai/subs/for?file=${encodeURIComponent(path)}`)).json();
@@ -3331,6 +3627,7 @@ function aiOnEpisodeLoaded() {
 fetch('/api/ai/capabilities').then((r) => r.json()).then((c) => {
   aiAvailable = !!c.available;
   aiUi.gen.disabled = aiUi.all.disabled = !aiAvailable;
+  aiLocal = !!c.local;
   aiVad = !!c.vad;
   setAiMode(aiMode, false);
   if (!aiAvailable) aiUi.hint.textContent = 'Needs whisper.cpp and a model on the device \u2014 see README "AI subtitles".';
@@ -3415,7 +3712,7 @@ async function refreshTasks() {
   } catch (e) {}
 }
 $('btnTasksStopAll').onclick = async () => {
-  if (!window.confirm('Stop all running tasks?')) return;
+  if (!(await astraConfirm('Everything running right now will be cancelled.', { title: 'Stop all tasks?', ok: 'Stop all', danger: true }))) return;
   await fetch('/api/tasks/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'all' }) });
   refreshTasks();
 };
@@ -3492,7 +3789,7 @@ function vttToSrtClient(v) {
     return txt ? `${++n}\n${t}\n${txt}\n` : '';
   }).filter(Boolean).join('\n');
 }
-$('btnSubDownload').onclick = async () => {
+const subDownload = async () => {
   const row = subTrackList.querySelector('.opt-row.selected');
   if (!row || !mainTrack.src || row.textContent.trim() === 'Off') { showToast('Pick a subtitle first', 2200); return; }
   try {
@@ -3504,11 +3801,11 @@ $('btnSubDownload').onclick = async () => {
     showToast('Subtitle saved (.srt)', 2200);
   } catch (e) { showToast('Could not save the subtitle', 2500); }
 };
-$('btnSubRemove').onclick = async () => {
+const subRemove = async () => {
   const row = subTrackList.querySelector('.opt-row.selected');
   if (!row || row.textContent.trim() === 'Off') { showToast('Nothing to remove - subtitles are off', 2200); return; }
   if (!row.dataset.aiKey && !row.dataset.extPath) { showToast('Built-in tracks cannot be removed - choose Off instead', 3000); return; }
-  if (!window.confirm('Remove this subtitle?')) return;
+  if (!(await astraConfirm('The selected subtitle will be removed.', { title: 'Remove subtitle?', ok: 'Remove', danger: true }))) return;
   if (row.dataset.aiKey) {
     try { const r = await fetch('/api/ai/subs/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: row.dataset.aiKey }) }); const j = await r.json(); if (!r.ok) { showToast(j.error || 'Could not remove', 3000); return; } } catch (e) { showToast('Server not reachable', 2500); return; }
     aiShow(null);
@@ -3527,9 +3824,9 @@ $('btnSubRemove').onclick = async () => {
   aiUi.gen.onclick = async () => {
     if (!activeVideoPath) return;
     const again = lbl.textContent === 'Generate again';
-    if (again && !window.confirm('Replace the existing subtitle with a fresh one?\n(To keep it and add another, change the mode or language first.)')) return;
+    if (again && !(await astraConfirm('A fresh subtitle will replace the existing one. To keep it and add another, change the mode or language first.', { title: 'Replace subtitle?', ok: 'Replace' }))) return;
     const res = await fetch('/api/ai/subs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: activeVideoPath, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, songs: aiUi.songs.checked, mode: aiMode, priority: true, from: Math.floor(absoluteTime() || 0), force: again }) });
+      body: JSON.stringify({ file: activeVideoPath, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, songs: aiUi.songs.checked, online: aiUi.online.checked, mode: aiMode, priority: true, from: Math.floor(absoluteTime() || 0), force: again }) });
     const info = await res.json();
     if (info.error) { showToast(info.error, 5000); return; }
     if (again) { const old = subTrackList.querySelector(`[data-ai-key="${info.key}"]`); if (old) old.remove(); }
@@ -3545,51 +3842,130 @@ $('btnSubRemove').onclick = async () => {
   new MutationObserver(() => { if (m.classList.contains('open')) place(); else if (m.parentNode !== home) home.appendChild(m); }).observe(m, { attributes: true, attributeFilter: ['class'] });
 })();
 
-/* ===== v1.20 settings widgets ===== */
-// memory pickers: Off | 1 MB | 5 MB | 10 MB | Custom  (+ what that means in time for the current video)
+/* ===== v1.20 settings widgets (Compact Dropdown + Inline Custom Combo Box) ===== */
 (function () {
-  const fmtT = (sec) => (sec < 1 ? '0 s' : sec < 90 ? `${Math.round(sec)} seconds` : `${Math.floor(sec / 60)} min ${Math.round(sec % 60)} s`);
+  const fmtT = (sec) => (sec < 1 ? "0 s" : sec < 90 ? `${Math.round(sec)} seconds` : `${Math.floor(sec / 60)} min ${Math.round(sec % 60)} s`);
+  const fmtMB = (mb) => (mb >= 1024 && mb % 1024 === 0 ? `${mb / 1024} GB` : `${mb} MB`);
   const PRESETS = [0, 1, 5, 10];
-  const picks = [...document.querySelectorAll('.mem-pick')];
-  const tcOf = (key) => key === 'preBufMB10';
-  function render(el) {
-    const key = el.dataset.mem, mb = Number(prefs[key]) || 0, custom = el.dataset.custom === '1' || !PRESETS.includes(mb);
-    el.innerHTML = '';
-    const row = document.createElement('div'); row.className = 'mem-chips';
-    PRESETS.forEach((p) => {
-      const b = document.createElement('button'); b.className = 'chip-preset' + (!custom && mb === p ? ' active' : ''); b.textContent = p ? `${p} MB` : 'Off';
-      b.onclick = () => { prefs[key] = p; el.dataset.custom = '0'; savePrefs(); renderAll(); };
-      row.appendChild(b);
-    });
-    const cb = document.createElement('button'); cb.className = 'chip-preset' + (custom ? ' active' : ''); cb.textContent = 'Custom';
-    cb.onclick = () => { el.dataset.custom = '1'; renderAll(); };
-    row.appendChild(cb); el.appendChild(row);
-    if (custom) {
-      const cr = document.createElement('div'); cr.className = 'mem-custom';
-      const big = mb >= 1024 && mb % 1024 === 0;
-      cr.innerHTML = '<span>Memory allocation Custom</span><input type="number" min="0" step="any" inputmode="decimal" class="text-in mem-num"><select class="pref-select mem-unit"><option value="mb">MB</option><option value="gb">GB</option></select><button class="icon-btn mem-save" data-tip="Save" data-tip-pos="t"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></button>';
-      const num = cr.querySelector('.mem-num'), unit = cr.querySelector('.mem-unit');
-      unit.value = big ? 'gb' : 'mb'; num.value = big ? mb / 1024 : (mb || '');
-      const apply = () => { const n = parseFloat(num.value); if (!(n >= 0)) { showToast('Enter a number', 1800); return; } prefs[key] = Math.round(n * (unit.value === 'gb' ? 1024 : 1) * 100) / 100; savePrefs(); renderAll(); showToast('Saved', 1200); };
-      cr.querySelector('.mem-save').onclick = apply;
-      num.addEventListener('keydown', (e) => { if (e.key === 'Enter') apply(); });
-      el.appendChild(cr);
-    }
-    const note = document.createElement('div'); note.className = 'mem-note';
+  const picks = [...document.querySelectorAll(".mem-pick")];
+  const tcOf = (key) => key === "preBufMB10";
+  const SAVE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
+  const CHEV_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+
+  function noteText(key, mb) {
     const sec = bufSeconds(mb, tcOf(key)), real = tcOf(key) && mb > 0 ? Math.max(5, sec) : sec;
-    note.textContent = mb > 0 ? `≈ ${fmtT(real)} of ${activeVideoPath ? 'this video' : 'a typical 720p video'} is loaded before it starts${sec >= 600 ? ' (max 10 min)' : ''}` : (tcOf(key) ? 'Starts after a 5 second head start' : 'Starts right away');
-    el.appendChild(note);
+    return mb > 0
+      ? `≈ ${fmtT(real)} of ${activeVideoPath ? "this video" : "a typical 720p video"} is loaded before it starts${sec >= 600 ? " (max 10 min)" : ""}`
+      : (tcOf(key) ? "Starts after a 5 second head start" : "Starts right away");
   }
-  function renderAll() { picks.forEach(render); }
+
+  function render(el) {
+    const key = el.dataset.mem, mb = Number(prefs[key]) || 0, isCompact = el.classList.contains("compact");
+    const isPreset = PRESETS.includes(mb);
+    const editing = el.dataset.edit === "1" || (isCompact && !isPreset);
+    el.innerHTML = "";
+
+    const sel = document.createElement("select");
+    sel.className = "pref-select";
+    sel.setAttribute("aria-label", "Pre-buffer memory");
+    PRESETS.forEach((p) => sel.add(new Option(p ? `${p} MB` : "Off", String(p))));
+    if (!isPreset && !isCompact) sel.add(new Option(`${fmtMB(mb)} (custom)`, "cur"));
+    sel.add(new Option("Custom…", "custom"));
+    sel.value = editing ? "custom" : (isPreset ? String(mb) : "cur");
+
+    const extNote = document.getElementById(`note-${key}`);
+    const updateNote = (valMb) => {
+      const txt = noteText(key, valMb);
+      if (extNote) extNote.textContent = txt;
+      const inNote = el.querySelector(".mem-note");
+      if (inNote) inNote.textContent = txt;
+    };
+
+    sel.onchange = () => {
+      if (sel.value === "custom") { el.dataset.edit = "1"; render(el); return; }
+      if (sel.value === "cur") return;
+      prefs[key] = Number(sel.value);
+      el.dataset.edit = "0";
+      savePrefs();
+      renderAll();
+    };
+
+    if (editing) {
+      const comboWrap = document.createElement("div");
+      comboWrap.className = "prebuf-custom-combo";
+
+      const box = document.createElement("div");
+      box.className = "prebuf-combo-box";
+
+      const inp = document.createElement("input");
+      inp.type = "number";
+      inp.min = "0";
+      inp.max = "4096";
+      inp.step = "1";
+      inp.value = String(mb || 50);
+      inp.setAttribute("aria-label", "Custom MB");
+      inp.oninput = () => updateNote(Math.max(0, parseFloat(inp.value) || 0));
+
+      const unit = document.createElement("span");
+      unit.className = "prebuf-unit";
+      unit.textContent = "MB";
+
+      const arrowBtn = document.createElement("button");
+      arrowBtn.type = "button";
+      arrowBtn.className = "prebuf-arrow-btn";
+      arrowBtn.title = "Select preset";
+      arrowBtn.innerHTML = CHEV_ICON;
+
+      el.appendChild(sel);
+      box.append(inp, unit, arrowBtn);
+
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button";
+      saveBtn.className = "prebuf-save-btn";
+      saveBtn.title = "Save custom buffer";
+      saveBtn.innerHTML = SAVE_ICON;
+      saveBtn.onclick = () => {
+        const n = Math.max(0, Math.round((parseFloat(inp.value) || 0) * 100) / 100);
+        prefs[key] = n;
+        el.dataset.edit = PRESETS.includes(n) ? "0" : "1";
+        savePrefs();
+        renderAll();
+        showToast(`Pre-buffer saved: ${fmtMB(n)}`, 1400);
+      };
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveBtn.click(); } });
+
+      comboWrap.append(box, saveBtn);
+      el.appendChild(comboWrap);
+
+      requestAnimationFrame(() => {
+        const csBtn = el.querySelector(".cs-btn");
+        if (csBtn) {
+          el.querySelector(".cs").classList.add("prebuf-hidden-cs");
+          arrowBtn.onclick = (e) => { e.stopPropagation(); csBtn.click(); };
+        }
+      });
+    } else {
+      el.appendChild(sel);
+    }
+
+    if (!isCompact) {
+      const note = document.createElement("div");
+      note.className = "mem-note";
+      el.appendChild(note);
+    }
+    updateNote(mb);
+  }
+
+  function renderAll() { picks.forEach((p) => render(p)); }
   window.renderMemPickers = renderAll;
   renderAll();
 })();
 // auto-play toggles inside the player settings
 document.querySelectorAll('[data-pref]').forEach((el) => {
   el.checked = prefs[el.dataset.pref] !== false && !!prefs[el.dataset.pref];
-  el.addEventListener('change', () => { prefs[el.dataset.pref] = el.checked; savePrefs(); const o = document.getElementById('pref' + el.dataset.pref[0].toUpperCase() + el.dataset.pref.slice(1)); if (o) o.checked = el.checked; });
+  el.addEventListener('change', () => { prefs[el.dataset.pref] = el.checked; savePrefs(); const o = document.getElementById('pref' + el.dataset.pref[0].toUpperCase() + el.dataset.pref.slice(1)); if (o) o.checked = el.checked; document.querySelectorAll('[data-pref="' + el.dataset.pref + '"]').forEach((x) => { x.checked = el.checked; }); });
 });
-['prefAutoPlay', 'prefAutoNext'].forEach((id) => { const el = $(id); if (el) el.addEventListener('change', () => { const m = document.querySelector('[data-pref="' + id.slice(4, 5).toLowerCase() + id.slice(5) + '"]'); if (m) m.checked = el.checked; }); });
+['prefAutoPlay', 'prefAutoNext'].forEach((id) => { const el = $(id); if (el) el.addEventListener('change', () => { document.querySelectorAll('[data-pref="' + id.slice(4, 5).toLowerCase() + id.slice(5) + '"]').forEach((m) => { m.checked = el.checked; }); }); });
 // every Save button: store everything now (and sync to the other devices)
 document.addEventListener('click', (e) => {
   const b = e.target.closest && e.target.closest('.save-btn');
@@ -3683,3 +4059,277 @@ setInterval(() => {
 }, 10000);
 applyLite();
 const _lite = $('prefLite'); if (_lite) _lite.addEventListener('change', applyLite);
+
+
+/* ------------------------------------------------------------------ */
+/* v1.21 subtitle row actions (save / remove sit next to the name)     */
+(function subRowActions() {
+  const ICON_SAVE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+  const ICON_DEL = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+  const mkBtn = (cls, label, icon, fn) => {
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'row-act-btn ' + cls; b.setAttribute('aria-label', label); b.title = label; b.innerHTML = icon;
+    b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
+  function decorate() {
+    subTrackList.querySelectorAll('.opt-row').forEach((row, i) => {
+      if (i === 0 || row.querySelector('.row-act')) return; // first row is "Off"
+      const name = document.createElement('span'); name.className = 'sub-name';
+      while (row.firstChild) name.appendChild(row.firstChild);
+      const act = document.createElement('span'); act.className = 'row-act';
+      act.appendChild(mkBtn('ra-save', 'Save subtitle as .srt', ICON_SAVE, subDownload));
+      act.appendChild(mkBtn('ra-del', 'Remove subtitle', ICON_DEL, subRemove));
+      row.appendChild(name); row.appendChild(act);
+    });
+  }
+  new MutationObserver(decorate).observe(subTrackList, { childList: true, subtree: true });
+  decorate();
+})();
+
+/* ------------------------------------------------------------------ */
+/* v1.21 safer sliders: a scroll or a stray tap never changes a setting */
+(function safeSliders() {
+  document.querySelectorAll('.settings-modal input.custom-range').forEach((rng) => {
+    let startVal = null, sx = 0, sy = 0, locked = false, guard = false, engaged = false;
+    const restore = () => { guard = true; rng.value = startVal; rng.dispatchEvent(new Event('input', { bubbles: true })); rng.dispatchEvent(new Event('change', { bubbles: true })); guard = false; };
+    rng.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') { startVal = null; return; }
+      startVal = rng.value; sx = e.clientX; sy = e.clientY; locked = false; engaged = false;
+      // Only a grab on the thumb moves the value; touching the bare track is ignored
+      const r = rng.getBoundingClientRect(), mn = +rng.min, mx = +rng.max;
+      const thumbX = r.left + ((+rng.value - mn) / (mx - mn || 1)) * r.width;
+      if (Math.abs(e.clientX - thumbX) > 28) locked = true;
+    });
+    rng.addEventListener('pointermove', (e) => {
+      if (startVal === null || engaged) return;
+      const dx = Math.abs(e.clientX - sx), dy = Math.abs(e.clientY - sy);
+      if (dy > 8 && dy > dx) { locked = true; if (rng.value !== startVal) restore(); }
+      else if (dx > 6) engaged = true;
+    });
+    rng.addEventListener('input', (e) => { if (!guard && locked && startVal !== null) { e.stopImmediatePropagation(); restore(); } }, true);
+    ['pointerup', 'pointercancel'].forEach((ev) => rng.addEventListener(ev, () => { setTimeout(() => { startVal = null; locked = false; }, 0); }));
+    rng.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+  });
+})();
+
+
+/* ------------------------------------------------------------------ */
+/* v1.22 custom UI: dropdowns, color picker, confirm dialog            */
+(function customUI() {
+  const CHEV = '<svg class="cs-chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+  const CHECK = '<svg class="cs-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  let cur = null;
+  function closePop() { if (!cur) return; cur.menu.remove(); cur.btn.classList.remove('open'); cur.btn.setAttribute('aria-expanded', 'false'); cur = null; }
+  // Rectangle of el in the coordinate space of its container (the player is rotated in fake fullscreen)
+  function rectIn(el, box) {
+    const r = el.getBoundingClientRect();
+    if (box === document.body) return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+    if (box.classList.contains('fake-fs')) {
+      const inv = new DOMMatrix(getComputedStyle(box).transform).inverse();
+      const p = [[r.left, r.top], [r.right, r.top], [r.left, r.bottom], [r.right, r.bottom]].map(([x, y]) => inv.transformPoint(new DOMPoint(x, y)));
+      const xs = p.map((q) => q.x), ys = p.map((q) => q.y), l = Math.min(...xs), t = Math.min(...ys);
+      return { left: l, top: t, right: Math.max(...xs), bottom: Math.max(...ys), width: Math.max(...xs) - l, height: Math.max(...ys) - t };
+    }
+    const c = box.getBoundingClientRect(), ox = c.left + box.clientLeft, oy = c.top + box.clientTop;
+    return { left: r.left - ox, top: r.top - oy, right: r.right - ox, bottom: r.bottom - oy, width: r.width, height: r.height };
+  }
+  function openPop(btn, anchor, build, cls) {
+    if (cur && cur.btn === btn) { closePop(); return; }
+    closePop();
+    const box = btn.closest('.player-wrapper') || document.body;
+    const menu = document.createElement('div'); menu.className = 'cs-menu ' + (cls || ''); menu.setAttribute('role', 'listbox');
+    menu.style.position = box === document.body ? 'fixed' : 'absolute'; menu.style.visibility = 'hidden';
+    build(menu, closePop); box.appendChild(menu);
+    const tr = rectIn(anchor, box);
+    const cw = box === document.body ? innerWidth : box.clientWidth, ch = box === document.body ? innerHeight : box.clientHeight;
+    menu.style.minWidth = Math.max(tr.width, cls === 'cc-menu' ? 0 : 150) + 'px';
+    const mw = menu.offsetWidth, mh = menu.scrollHeight, below = ch - tr.bottom - 10, above = tr.top - 10;
+    const down = mh <= below || below >= above, avail = Math.max(120, down ? below : above);
+    menu.style.maxHeight = avail + 'px';
+    const h = Math.min(mh, avail);
+    menu.style.left = Math.max(8, Math.min(tr.left, cw - mw - 8)) + 'px';
+    menu.style.top = (down ? tr.bottom + 6 : tr.top - h - 6) + 'px';
+    menu.dataset.dir = down ? 'down' : 'up'; menu.style.visibility = '';
+    btn.classList.add('open'); btn.setAttribute('aria-expanded', 'true'); cur = { menu, btn };
+    const on = menu.querySelector('.on'); if (on) on.scrollIntoView({ block: 'nearest' });
+  }
+  document.addEventListener('pointerdown', (e) => { if (cur && !cur.menu.contains(e.target) && !cur.btn.contains(e.target)) closePop(); }, true);
+  document.addEventListener('scroll', (e) => { if (cur && !cur.menu.contains(e.target)) closePop(); }, true);
+  window.addEventListener('resize', closePop);
+  document.addEventListener('keydown', (e) => {
+    if (!cur) return;
+    if (e.key === 'Escape') { e.stopPropagation(); const b = cur.btn; closePop(); b.focus(); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const items = [...cur.menu.querySelectorAll('.cs-opt:not(:disabled)')]; if (!items.length) return;
+      e.preventDefault(); const i = items.indexOf(document.activeElement);
+      items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+    }
+  }, true);
+
+  const valDesc = (proto) => Object.getOwnPropertyDescriptor(proto, 'value');
+  function enhanceSelect(sel) {
+    if (sel._cs) return; sel._cs = true;
+    const w = document.createElement('div'); w.className = 'cs'; w.style.cssText = sel.style.cssText; sel.style.cssText = '';
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'cs-btn';
+    b.setAttribute('aria-haspopup', 'listbox'); b.setAttribute('aria-expanded', 'false'); b.setAttribute('aria-label', sel.getAttribute('aria-label') || 'Choose an option');
+    b.innerHTML = '<span class="cs-val"></span>' + CHEV;
+    sel.parentNode.insertBefore(w, sel); w.appendChild(b); w.appendChild(sel);
+    sel.classList.add('cs-native'); sel.tabIndex = -1; sel.setAttribute('aria-hidden', 'true');
+    const sync = () => { const o = sel.options[sel.selectedIndex]; b.querySelector('.cs-val').textContent = o ? o.textContent.trim() : ''; };
+    const d = valDesc(HTMLSelectElement.prototype);
+    Object.defineProperty(sel, 'value', { get() { return d.get.call(sel); }, set(v) { d.set.call(sel, v); sync(); }, configurable: true });
+    sel.addEventListener('change', sync); sync();
+    b.onclick = () => openPop(b, b, (menu) => {
+      [...sel.options].forEach((o, i) => {
+        const it = document.createElement('button'); it.type = 'button'; it.className = 'cs-opt' + (i === sel.selectedIndex ? ' on' : '');
+        it.setAttribute('role', 'option'); it.disabled = o.disabled; it.innerHTML = '<span></span>' + CHECK; it.firstChild.textContent = o.textContent.trim();
+        it.onclick = () => { sel.value = o.value; sel.dispatchEvent(new Event('input', { bubbles: true })); sel.dispatchEvent(new Event('change', { bubbles: true })); closePop(); b.focus(); };
+        menu.appendChild(it);
+      });
+    });
+  }
+  const SWATCHES = ['#ffffff', '#fde047', '#fbbf24', '#fb923c', '#ef4444', '#f472b6', '#a78bfa', '#60a5fa', '#22d3ee', '#4ade80', '#9ca3af', '#000000'];
+  function enhanceColor(inp) {
+    if (inp._cs) return; inp._cs = true;
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'cc-btn'; b.setAttribute('aria-haspopup', 'dialog'); b.setAttribute('aria-label', 'Pick a color'); b.innerHTML = '<i></i>';
+    inp.parentNode.insertBefore(b, inp); inp.classList.add('cs-native'); inp.tabIndex = -1;
+    const sync = () => { b.firstChild.style.background = inp.value; };
+    const d = valDesc(HTMLInputElement.prototype);
+    Object.defineProperty(inp, 'value', { get() { return d.get.call(inp); }, set(v) { d.set.call(inp, v); sync(); }, configurable: true });
+    sync();
+    const set = (v) => { inp.value = v; inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new Event('change', { bubbles: true })); };
+    b.onclick = () => openPop(b, b, (menu) => {
+      const g = document.createElement('div'); g.className = 'cc-grid';
+      SWATCHES.forEach((c) => {
+        const s = document.createElement('button'); s.type = 'button'; s.className = 'cc-sw cs-opt' + (c === inp.value.toLowerCase() ? ' on' : ''); s.style.background = c; s.setAttribute('aria-label', c);
+        s.onclick = () => { set(c); closePop(); }; g.appendChild(s);
+      });
+      const hex = document.createElement('input'); hex.className = 'cc-hex'; hex.maxLength = 7; hex.value = inp.value; hex.setAttribute('aria-label', 'Hex color');
+      hex.oninput = () => { if (/^#[0-9a-f]{6}$/i.test(hex.value)) set(hex.value.toLowerCase()); };
+      menu.appendChild(g); menu.appendChild(hex);
+    }, 'cc-menu');
+  }
+  const scan = (root) => {
+    root.querySelectorAll('select').forEach(enhanceSelect);
+    root.querySelectorAll('input[type="color"]').forEach(enhanceColor);
+  };
+  scan(document);
+  new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => { if (n.nodeType === 1) { if (n.matches('select')) enhanceSelect(n); else if (n.matches('input[type="color"]')) enhanceColor(n); else scan(n); } }))).observe(document.body, { childList: true, subtree: true });
+
+  // Confirm dialog (replaces the browser's confirm box)
+  window.astraConfirm = (message, o = {}) => new Promise((resolve) => {
+    const host = document.fullscreenElement || document.body;
+    const scrim = document.createElement('div'); scrim.className = 'dlg-scrim';
+    scrim.innerHTML = '<div class="dlg" role="alertdialog" aria-modal="true"><h4></h4><p></p><div class="dlg-act"><button type="button" class="pill-btn dlg-cancel">Cancel</button><button type="button" class="pill-btn dlg-ok"></button></div></div>';
+    scrim.querySelector('h4').textContent = o.title || 'Are you sure?';
+    scrim.querySelector('p').textContent = message || '';
+    const ok = scrim.querySelector('.dlg-ok'); ok.textContent = o.ok || 'Confirm'; ok.classList.add(o.danger ? 'danger' : 'highlight');
+    const done = (v) => { document.removeEventListener('keydown', key, true); scrim.classList.remove('on'); setTimeout(() => scrim.remove(), 160); resolve(v); };
+    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(false); } };
+    document.addEventListener('keydown', key, true);
+    ok.onclick = () => done(true); scrim.querySelector('.dlg-cancel').onclick = () => done(false);
+    scrim.addEventListener('pointerdown', (e) => { if (e.target === scrim) done(false); });
+    host.appendChild(scrim); requestAnimationFrame(() => scrim.classList.add('on')); scrim.querySelector('.dlg-cancel').focus();
+  });
+})();
+
+
+/* ===== v1.21.1: online AI, cover art, next/previous bar, animation switch ===== */
+(function v1211() {
+  /* --- online AI settings --- */
+  const PRESETS = { groq: ['https://api.groq.com/openai/v1', 'whisper-large-v3-turbo'], openai: ['https://api.openai.com/v1', 'whisper-1'] };
+  const st = $('onlineAiState'), key = $('oaKey'), base = $('oaBase'), model = $('oaModel'), preset = $('oaPreset');
+  let hint = '';
+  function paintBase() { $('oaBaseRow').style.display = preset.value === 'custom' ? '' : 'none'; }
+  function applyState(c) {
+    hint = c.hint || '';
+    key.value = ''; key.placeholder = c.configured ? hint + '  (saved, type to replace)' : 'Paste key';
+    base.value = c.base; model.value = c.model;
+    preset.value = c.base === PRESETS.groq[0] ? 'groq' : c.base === PRESETS.openai[0] ? 'openai' : 'custom'; paintBase();
+    st.textContent = c.configured ? 'Ready \u00b7 ' + c.model : 'Not set up. Local whisper.cpp is used instead';
+    $('oaRemove').style.display = c.configured ? '' : 'none';
+    const on = aiUi.online, row = $('aiOnlineRow');
+    on.disabled = !c.configured; $('aiOnlineHint').textContent = c.configured ? '(uses your API)' : '(add key in Settings)';
+    if (!c.configured) on.checked = false;
+    else if (!aiLocal && !on.checked) on.checked = true;      // nothing local to fall back on
+    aiUi.gen.disabled = aiUi.all.disabled = !(aiLocal || c.configured);
+    row.classList.toggle('dim', !c.configured);
+  }
+  function load() { return fetch('/api/ai/online').then((r) => r.json()).then(applyState).catch(() => {}); }
+  preset.addEventListener('change', () => { if (PRESETS[preset.value]) { base.value = PRESETS[preset.value][0]; model.value = PRESETS[preset.value][1]; } paintBase(); });
+  $('oaShow').onclick = () => { key.type = key.type === 'password' ? 'text' : 'password'; };
+  $('oaSave').onclick = async () => {
+    const body = { base: base.value.trim(), model: model.value.trim() }; if (key.value.trim()) body.key = key.value.trim();
+    try {
+      const r = await fetch('/api/ai/online', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j2 = await r.json(); if (!r.ok) { showToast(j2.error || 'Could not save', 3000); return; }
+      key.type = 'password'; applyState(j2); showToast('Online AI saved', 1800);
+      if (j2.configured && !aiUi.online.checked) { aiUi.online.checked = true; aiUi.online.dispatchEvent(new Event('change')); }
+    } catch (e) { showToast('Could not save', 2500); }
+  };
+  $('oaRemove').onclick = async () => {
+    if (!(await astraConfirm('The saved key is deleted from this device. Local AI still works.', { title: 'Remove API key?', ok: 'Remove', danger: true }))) return;
+    try { const r = await fetch('/api/ai/online', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear: true }) }); applyState(await r.json()); showToast('Key removed', 1800); } catch (e) {}
+  };
+  setTimeout(load, 400);
+
+  /* --- animation switch (reuses the effects-off rules of Low-memory mode) --- */
+  function paintAnim() {
+    document.documentElement.classList.toggle('no-anim', prefs.anim === false);
+    $('btnAnimOn').classList.toggle('on', prefs.anim !== false); $('btnAnimOff').classList.toggle('on', prefs.anim === false);
+    $('btnAnimOn').setAttribute('aria-pressed', prefs.anim !== false); $('btnAnimOff').setAttribute('aria-pressed', prefs.anim === false);
+  }
+  $('btnAnimOn').onclick = () => { prefs.anim = true; savePrefs(); paintAnim(); };
+  $('btnAnimOff').onclick = () => { prefs.anim = false; savePrefs(); paintAnim(); };
+  paintAnim();
+
+  /* --- next / previous --- */
+  const pName = $('prevEpName'), nName = $('nextEpName'), pB = $('btnPrevEp'), nB = $('btnNextEp');
+  function label(it) { if (!it) return '-'; const p = epCardParts(it); return (p.tag ? p.tag + ' \u00b7 ' : '') + p.title; }
+  window.updateNavBar = function () {
+    const i = currentVideoList.findIndex(isActiveItem), prev = i > 0 ? currentVideoList[i - 1] : null, next = i >= 0 ? currentVideoList[i + 1] : null;
+    pB.disabled = !prev; nB.disabled = !next; pName.textContent = prev ? label(prev) : 'First episode'; nName.textContent = next ? label(next) : 'Last episode';
+  };
+  pB.onclick = () => playAdjacentEpisode(-1); nB.onclick = () => playAdjacentEpisode(1);
+  video.addEventListener('loadedmetadata', updateNavBar);
+  const oldRender = renderInlinePlaylist; renderInlinePlaylist = function () { const r = oldRender.apply(this, arguments); updateNavBar(); return r; };
+  updateNavBar();
+
+})();
+
+/* ===== v1.24 Nav, Chapter Pill & Paused Info Overlay ===== */
+(function initV124Hooks() {
+  const ytCenterPauseBadge = $("ytCenterPauseBadge");
+  if (ytCenterPauseBadge) ytCenterPauseBadge.onclick = (e) => { e.stopPropagation(); if (!isScreenLocked) togglePlayPause(); };
+  const prevEpBtn = $("prevEpBtn");
+  const nextEpBtn = $("nextEpBtn");
+  const chLbl = $("chapterLabel");
+  if (prevEpBtn) prevEpBtn.onclick = () => { if (!isScreenLocked) playAdjacentEpisode(-1); };
+  if (nextEpBtn) nextEpBtn.onclick = () => { if (!isScreenLocked) playAdjacentEpisode(1); };
+  if (chLbl) chLbl.onclick = (e) => { e.stopPropagation(); toggleChaptersPanel(); };
+
+  function syncPausedOverlay() {
+    const paused = video.paused && !!activeVideoPath && !video.ended && !internalPause;
+    const chPanel = $("chaptersPanel");
+    const panelOpen = settingsModal.classList.contains("open") || playerEpisodesDrawer.classList.contains("open") || (chPanel && chPanel.classList.contains("open"));
+    playerWrapper.classList.toggle("is-paused-ui", paused && !panelOpen && !isScreenLocked);
+    const p = parseMedia((activeVideoPath || "").split("/").pop() || "");
+    if ($("pausedSeriesBadge")) $("pausedSeriesBadge").textContent = (currentPathTokens[0] || "ASTRA PLAYER").toUpperCase();
+    if ($("pausedAnimeTitle")) $("pausedAnimeTitle").textContent = p.title || playerCurrentTitle.textContent;
+    if ($("pausedEpTitle")) $("pausedEpTitle").textContent = cleanMediaTitle((activeVideoPath || "").split("/").pop() || "");
+    if ($("pausedChTime")) {
+      const ch = chapterAt(absoluteTime());
+      const tm = `${formatTime(absoluteTime())} / ${formatTime(getDuration())}`;
+      $("pausedChTime").textContent = [ch ? ch.title : "", tm].filter(Boolean).join("  •  ");
+    }
+    if ($("pausedMetaRow")) {
+      const dur = formatTime(getDuration());
+      const q = $("qualityValue") ? $("qualityValue").textContent : "Auto";
+      $("pausedMetaRow").textContent = [dur !== "00:00" ? dur : "", q, sourceIs10Bit ? "10-bit" : "8-bit Direct"].filter(Boolean).join("  •  ");
+    }
+  }
+  ["play", "playing", "pause", "loadedmetadata", "emptied"].forEach((ev) => video.addEventListener(ev, syncPausedOverlay));
+  new MutationObserver(syncPausedOverlay).observe(settingsModal, { attributes: true, attributeFilter: ["class"] });
+  new MutationObserver(syncPausedOverlay).observe(playerEpisodesDrawer, { attributes: true, attributeFilter: ["class"] });
+  if ($("chaptersPanel")) new MutationObserver(syncPausedOverlay).observe($("chaptersPanel"), { attributes: true, attributeFilter: ["class"] });
+})();

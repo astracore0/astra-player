@@ -260,3 +260,20 @@ Binary: `~/whisper.cpp/build/bin/whisper-cli`. Models are found in `./models`, `
 `sed -i '/inline static int32x4_t vcvtnq_s32_f32/,/^}/d' ggml/src/ggml-cpu/ggml-cpu-impl.h` and build again.
 
 Generated subtitles are cached in `subtitles/ai/` (delete the file to regenerate).
+
+
+## Custom thumbnails
+Give a series folder your own cover in `config.json` (next to server.js). Paths can be written the Android way (`/sdcard/...`); on Termux they are found through `~/storage/shared`.
+
+```json
+{
+  "thumbnails": [
+    { "path": "/sdcard/.anime/youtube/zzz by chiken", "thumbnail": "/sdcard/download/playing zzz series.png" },
+    { "path": "/sdcard/.anime/darling in franxx S01", "thumbnail": "/sdcard/download/darling in franxx S01 Thumbnail.png" }
+  ]
+}
+```
+A custom thumbnail always wins over the online cover and the video frame. png, jpg, webp, gif, avif up to 12 MB. Restart the server (or reload the library) after editing.
+
+## Online AI subtitles (optional)
+Settings > Online AI subtitles: pick Groq (free tier) or OpenAI or any OpenAI-compatible address, paste the API key, Save. In the player menu > Subtitles turn on "Online AI" and press Generate. Without a key everything stays local (whisper.cpp).

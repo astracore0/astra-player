@@ -4,10 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content">
   <title>Astra Player</title>
-  <link rel="stylesheet" href="style.css?v=290">
+  <link rel="stylesheet" href="style.css?v=292">
   <script>window.open = function() { return null; };</script>
 </head>
 <body>
+  <div class="astra-ambient-bg" id="astraAmbientBg"></div>
 
   <div class="menu-overlay" id="menuOverlay"></div>
   <aside class="side-drawer" id="sideDrawer">
@@ -132,6 +133,17 @@
       </video>
 
       <div class="custom-subtitle-display" id="subDisplayBox"></div>
+      <button type="button" class="yt-center-pause-badge" id="ytCenterPauseBadge" aria-label="Play">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="currentColor"><polygon points="7 4 20 12 7 20 7 4"/></svg>
+      </button>
+      <div class="paused-info-layer" id="pausedInfoLayer">
+        <div class="paused-series-badge" id="pausedSeriesBadge">ASTRA STREAM</div>
+        <h2 class="paused-anime-title" id="pausedAnimeTitle">The Eminence in Shadow</h2>
+        <div class="paused-meta-row" id="pausedMetaRow">720p • Direct</div>
+        <div class="paused-ep-title" id="pausedEpTitle">Select an Episode</div>
+        <div class="paused-ch-time" id="pausedChTime"></div>
+      </div>
+      <div class="player-empty" id="playerEmpty"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="3"/><polygon points="10 9 16 12 10 15 10 9"/></svg><b>Nothing playing</b><span>Pick an episode below or browse a folder</span></div>
 
       <div class="touch-zones-container" id="touchZonesContainer">
         <div class="touch-side" id="touchLeft"><div class="ripple-wave" id="rippleLeft">-10s</div></div>
@@ -178,7 +190,7 @@
             <div class="chapter-marks" id="chapterMarks"></div>
             <input type="range" class="timeline-slider" id="timelineSlider" value="0" min="0" max="100" step="0.1">
           </div>
-          <span class="chapter-label" id="chapterLabel"></span>
+          <button type="button" class="chapter-label chapter-pill-trigger" id="chapterLabel" title="Chapters"></button>
           <span class="time-label" id="timeLabel">00:00 / 00:00</span>
         </div>
 
@@ -199,12 +211,14 @@
           </div>
 
           <div class="btn-group">
-            <button class="pill-btn" id="chaptersBtn" style="display:none" data-tip="Chapters">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h16"/></svg>
-              <span>Chapters</span>
+            <button class="icon-btn" id="prevEpBtn" data-tip="Previous episode">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2.5" height="14" rx="1"/><polygon points="20 5 9 12 20 19 20 5"/></svg>
+            </button>
+            <button class="icon-btn" id="nextEpBtn" data-tip="Next episode">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><polygon points="4 5 15 12 4 19 4 5"/><rect x="17.5" y="5" width="2.5" height="14" rx="1"/></svg>
             </button>
             <button class="pill-btn highlight" id="floatingEpisodesBtn" data-tip="Episodes">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="11" rx="2"/><polygon points="8.5 7.5 12.5 9.5 8.5 11.5 8.5 7.5" fill="currentColor" stroke="none"/><path d="M7 19h12a2 2 0 0 0 2-2V8"/></svg>
               <span>Episodes</span>
             </button>
             <button class="icon-btn" id="settingsBtn" data-tip="Settings">
@@ -278,10 +292,6 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
               <span>Add subtitle file</span>
             </button>
-            <div class="ai-row sub-act-row">
-              <button class="pill-btn grow" id="btnSubDownload" data-tip="Save this subtitle as a file" data-tip-hold="2000" data-tip-pos="t"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Save</span></button>
-              <button class="pill-btn danger grow" id="btnSubRemove" data-tip="Remove the selected subtitle" data-tip-hold="2000" data-tip-pos="t"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span>Remove</span></button>
-            </div>
           </div>
 
           <div class="card ai-box" id="aiBox">
@@ -298,6 +308,7 @@
               </select>
               <label class="switch-row"><input type="checkbox" id="aiTranslate"><i class="tgl"></i><span>To English</span></label>
               <label class="switch-row" data-tip="Also reads songs, OP/ED and music scenes (slower, may add a few extra lines)" data-tip-hold="2000"><input type="checkbox" id="aiSongs"><i class="tgl"></i><span>Include songs &amp; music scenes</span></label>
+              <label class="switch-row" id="aiOnlineRow" data-tip="Sends the audio to your online AI service instead of running on this phone. Set the API key in Settings" data-tip-hold="2000"><input type="checkbox" id="aiOnline" disabled><i class="tgl"></i><span>Online AI <small id="aiOnlineHint">(add key in Settings)</small></span></label>
             </div>
             <div class="ai-progress" id="aiProgress"><i id="aiBar"></i></div>
             <div class="ai-row">
@@ -314,23 +325,6 @@
             <p class="ai-hint">+ shows subtitles later, − earlier. Keys: Z / X (±0.1s)</p>
           </div>
 
-          <div id="subStyleSection" class="card" style="display:block">
-            <div class="card-head"><h6>Subtitle look</h6><button class="mini-link" id="btnSubStyleReset">Reset</button></div>
-            <div class="slider-row"><label>Font <select class="pref-select" id="selSubFont" style="max-width:60%">
-              <option value="">Default</option><option value="sans">Clean sans</option><option value="serif">Serif</option><option value="mono">Mono</option>
-              <option value="round">Rounded</option><option value="comic">Comic</option><option value="impact">Impact</option><option value="hand">Handwriting</option>
-            </select></label></div>
-            <div class="slider-row"><label>Size <span id="lblSubSize">18px</span></label><input type="range" class="custom-range" id="rngSubSize" min="12" max="48" value="18"></div>
-            <div class="slider-row"><label>Scale <span id="lblSubScale">100%</span></label><input type="range" class="custom-range" id="rngSubScale" min="60" max="150" value="100"></div>
-            <div class="slider-row"><label>Border size <span id="lblSubOutline">1.5px</span></label><input type="range" class="custom-range" id="rngSubOutline" min="0" max="8" step="0.5" value="1.5"></div>
-            <div class="slider-row"><label>Background <span id="lblSubBgOp">Off</span></label><input type="range" class="custom-range" id="rngSubBgOp" min="0" max="100" step="5" value="0"></div>
-            <div class="slider-row"><label>Height from bottom <span id="lblSubPos">0%</span></label><input type="range" class="custom-range" id="rngSubPos" min="-5" max="80" step="1" value="0"></div>
-            <div class="checkbox-row"><label><input type="checkbox" id="chkSubBold" checked> Bold</label><label><input type="checkbox" id="chkSubShadow" checked> Shadow</label>
-              <label><input type="checkbox" id="chkSubBorder" checked> Border</label><label><input type="checkbox" id="chkSubBg" style="display:none"></label></div>
-            <div class="color-pick-row"><label>Text <input type="color" id="colSubText" value="#ffffff"></label><label>Border <input type="color" id="colSubBorder" value="#000000"></label><label>Box <input type="color" id="colSubBgCol" value="#000000"></label></div>
-            <p class="ai-hint">Lifts automatically above the controls while they are showing.</p>
-            <button class="pill-btn highlight save-btn" data-save="subs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
-          </div>
         </div>
 
         <div class="tab-body" id="tabSpeed">
@@ -390,6 +384,31 @@
             <button class="pill-btn highlight save-btn" data-save="audio"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
           </div>
         </div>
+        <div class="sub-page" id="subStylePage" aria-hidden="true">
+          <div class="sub-page-head">
+            <button class="icon-btn" id="subStyleBack" aria-label="Back to subtitles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+            <h6>Subtitle look</h6>
+            <button class="mini-link" id="btnSubStyleReset">Reset</button>
+          </div>
+          <div class="sub-page-body">
+          <div id="subStyleSection" class="card" >
+                        <div class="slider-row"><label>Font <select class="pref-select" id="selSubFont" style="max-width:60%">
+              <option value="">Default</option><option value="sans">Clean sans</option><option value="serif">Serif</option><option value="mono">Mono</option>
+              <option value="round">Rounded</option><option value="comic">Comic</option><option value="impact">Impact</option><option value="hand">Handwriting</option>
+            </select></label></div>
+            <div class="slider-row"><label>Size <span id="lblSubSize">18px</span></label><input type="range" class="custom-range" id="rngSubSize" min="12" max="48" value="18"></div>
+            <div class="slider-row"><label>Scale <span id="lblSubScale">100%</span></label><input type="range" class="custom-range" id="rngSubScale" min="60" max="150" value="100"></div>
+            <div class="slider-row"><label>Border size <span id="lblSubOutline">1.5px</span></label><input type="range" class="custom-range" id="rngSubOutline" min="0" max="8" step="0.5" value="1.5"></div>
+            <div class="slider-row"><label>Background <span id="lblSubBgOp">Off</span></label><input type="range" class="custom-range" id="rngSubBgOp" min="0" max="100" step="5" value="0"></div>
+            <div class="slider-row"><label>Height from bottom <span id="lblSubPos">0%</span></label><input type="range" class="custom-range" id="rngSubPos" min="-5" max="80" step="1" value="0"></div>
+            <div class="checkbox-row"><label><input type="checkbox" id="chkSubBold" checked> Bold</label><label><input type="checkbox" id="chkSubShadow" checked> Shadow</label>
+              <label><input type="checkbox" id="chkSubBorder" checked> Border</label><label><input type="checkbox" id="chkSubBg" style="display:none"></label></div>
+            <div class="color-pick-row"><label>Text <input type="color" id="colSubText" value="#ffffff"></label><label>Border <input type="color" id="colSubBorder" value="#000000"></label><label>Box <input type="color" id="colSubBgCol" value="#000000"></label></div>
+            <p class="ai-hint">Lifts automatically above the controls while they are showing.</p>
+            <button class="pill-btn highlight save-btn" data-save="subs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button>
+          </div>
+          </div>
+        </div>
       </div>
 
       <div class="player-episodes-drawer" id="playerEpisodesDrawer">
@@ -403,10 +422,26 @@
       </div>
     </div>
 
-    <div class="shelf-section" style="margin-top:10px;">
-      <div class="shelf-header">
-        <h3 id="playerShelfTitle">Current Series Queue</h3>
+    <div class="player-bar" id="playerBar">
+      <button class="nav-btn" id="btnPrevEp" type="button" aria-label="Previous episode"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg><span class="nb-t"><b>Previous</b><small id="prevEpName">-</small></span></button>
+      <div class="anim-seg" role="group" aria-label="Animations">
+        <button type="button" id="btnAnimOn" class="on" data-tip="Smooth animations" data-tip-pos="t"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg><span>Animation on</span></button>
+        <button type="button" id="btnAnimOff" data-tip="No animation: lighter and faster on weak phones" data-tip-pos="t"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg><span>No animation</span></button>
       </div>
+      <button class="nav-btn next" id="btnNextEp" type="button" aria-label="Next episode"><span class="nb-t"><b>Next</b><small id="nextEpName">-</small></span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg></button>
+    </div>
+
+    <div class="queue-head" id="queueHead">
+      <div class="quick-toggles">
+        <label class="switch-row"><input type="checkbox" data-pref="autoPlay"><i class="tgl"></i><span>Auto Play</span></label>
+        <span class="qt-sep"></span>
+        <label class="switch-row"><input type="checkbox" data-pref="autoNext"><i class="tgl"></i><span>Auto Next</span></label>
+      </div>
+      <h3 id="playerShelfTitle" class="shelf-title">Current Series Queue</h3>
+      <div id="playerSeasons"></div>
+    </div>
+
+    <div class="shelf-section">
       <div class="explorer-content" id="playerInlinePlaylist">
         <div class="empty-hint">Select a series to show episodes</div>
       </div>
@@ -449,6 +484,10 @@
   <section class="page-view" id="view-settings">
     <div class="settings-card prefs-card">
       <div class="setting-item"><div><h5>Preferences</h5><p>Saved on this device</p></div></div>
+      <div class="setting-item"><div><h5>Network mode</h5><p>Offline uses local frames only. Online fetches original anime/playlist thumbnails &amp; backgrounds</p></div>
+        <select class="pref-select" id="prefNetworkMode"><option value="offline">Offline (Default)</option><option value="online">Online</option></select></div>
+      <div class="setting-item" id="rowThumbQuality" style="display:none"><div><h5>Online thumbnail quality</h5><p>Resolution for downloaded anime/playlist covers &amp; backgrounds</p></div>
+        <select class="pref-select" id="prefThumbQuality"><option value="360p">360p (Fast, low data)</option><option value="480p">480p (Balanced)</option></select></div>
       <div class="setting-item"><div><h5>Seek step</h5><p>Arrow keys, buttons, double-tap</p></div>
         <select class="pref-select" id="prefSeek"><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option></select></div>
       <div class="setting-item"><div><h5>Default resolution</h5><p id="prefHwText">Used for HEVC / 10-bit / compat mode</p></div>
@@ -457,8 +496,8 @@
         <select class="pref-select" id="prefLite"><option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option></select></div>
       <div class="setting-item"><div><h5>Hardware encoder</h5><p>Software = x264 (the v1.3 engine, most reliable). Auto tries the phone's H.264 encoder first</p></div>
         <select class="pref-select" id="prefHw"><option value="auto">Auto</option><option value="off">Software</option></select></div>
-      <div class="setting-item col"><div><h5>Pre-buffer · 8-bit videos</h5><p>Memory to fill before playing starts</p></div><div class="mem-pick" data-mem="preBufMB8"></div></div>
-      <div class="setting-item col"><div><h5>Pre-buffer · 10-bit videos</h5><p>Converted live, so it needs a head start (min 5 s)</p></div><div class="mem-pick" data-mem="preBufMB10"></div></div>
+      <div class="setting-item prebuf-setting-row"><div><h5>Pre-buffer · 8-bit videos</h5><p>Memory to fill before playing starts</p><p class="mem-note-sub" id="note-preBufMB8"></p></div><div class="mem-pick compact" data-mem="preBufMB8"></div></div>
+      <div class="setting-item prebuf-setting-row"><div><h5>Pre-buffer · 10-bit videos</h5><p>Converted live, so it needs a head start (min 5 s)</p><p class="mem-note-sub" id="note-preBufMB10"></p></div><div class="mem-pick compact" data-mem="preBufMB10"></div></div>
       <div class="setting-item"><div><h5>Auto-skip opening / ending</h5><p>Uses chapter names when available</p></div><label class="switch"><input type="checkbox" id="prefAutoSkip"><span></span></label></div>
       <div class="setting-item"><div><h5>Auto-play when a video opens</h5><p>Off = waits for you to press play</p></div><label class="switch"><input type="checkbox" id="prefAutoPlay"><span></span></label></div>
       <div class="setting-item"><div><h5>Auto-play next episode</h5><p>Off = stops at the end</p></div><label class="switch"><input type="checkbox" id="prefAutoNext"><span></span></label></div>
@@ -469,6 +508,18 @@
         <select class="pref-select" id="prefSleep"><option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">60 min</option><option value="-1">End of episode</option></select></div>
       <div class="setting-item"><div><h5>Thumbnail cache</h5></div><button class="action-btn" id="btnClearThumbs">Clear</button></div>
       <div class="setting-item"><div><h5>Save preferences</h5><p>Also synced to your other devices</p></div><button class="pill-btn highlight save-btn" data-save="prefs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>Save</span></button></div>
+    </div>
+
+    <div class="settings-card online-ai" id="onlineAiCard">
+      <div class="setting-item"><div><h5>Online AI subtitles <span class="badge-opt">optional</span></h5><p id="onlineAiState">Not set up. Local whisper.cpp is used instead</p></div></div>
+      <div class="oa-body">
+        <label class="oa-f"><span>Service</span><select class="pref-select" id="oaPreset"><option value="groq">Groq (free tier, fast)</option><option value="openai">OpenAI</option><option value="custom">Custom (OpenAI-compatible)</option></select></label>
+        <label class="oa-f"><span>API key</span><div class="oa-key"><input type="password" id="oaKey" class="text-in" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key"><button type="button" class="icon-btn" id="oaShow" aria-label="Show key"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div></label>
+        <label class="oa-f" id="oaBaseRow"><span>Address</span><input type="url" id="oaBase" class="text-in" autocomplete="off" spellcheck="false" placeholder="https://.../v1"></label>
+        <label class="oa-f"><span>Model</span><input type="text" id="oaModel" class="text-in" autocomplete="off" spellcheck="false"></label>
+        <p class="ai-hint">The key stays on your device's server (config.json) and is never shown again. Only 2-minute audio slices are sent, nothing else.</p>
+        <div class="oa-act"><button type="button" class="pill-btn danger" id="oaRemove">Remove key</button><button type="button" class="pill-btn highlight" id="oaSave">Save</button></div>
+      </div>
     </div>
 
     <div class="settings-card">
@@ -516,6 +567,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=290"></script>
+  <script src="script.js?v=292"></script>
 </body>
 </html>

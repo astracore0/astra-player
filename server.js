@@ -1,5 +1,7 @@
 'use strict';
 
+const dns = require("dns");
+try { dns.setDefaultResultOrder("ipv4first"); } catch (e) {}
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -1538,13 +1540,73 @@ function aiSkipRanges(file) {
     });
   });
 }
+
+/* ---- Online AI (optional): any OpenAI-compatible speech-to-text API (Groq, OpenAI, ...) ---- */
+const ONLINE_DEFAULT = { base: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3-turbo', key: '' };
+function onlineCfg() { const c = savedConfig.ai || {}; return { base: String(c.base || ONLINE_DEFAULT.base).replace(/\/+$/, ''), model: String(c.model || ONLINE_DEFAULT.model), key: String(c.key || '') }; }
+function onlineConfigured() { return !!onlineCfg().key; }
+function saveConfigFile() { try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(savedConfig, null, 2), { encoding: 'utf-8', mode: 0o600 }); return true; } catch (e) { log('ERROR', 'Could not save config.json (' + e.message + ')'); return false; } }
+app.get('/api/ai/online', (req, res) => {          // the key itself is never sent back
+  const c = onlineCfg();
+  res.json({ configured: !!c.key, base: c.base, model: c.model, hint: c.key ? '\u2022\u2022\u2022\u2022' + c.key.slice(-4) : '' });
+});
+app.post('/api/ai/online', (req, res) => {
+  const b = req.body || {}, cur = savedConfig.ai || {};
+  const next = { ...cur };
+  if (b.clear === true) { next.key = ''; }
+  else if (typeof b.key === 'string' && b.key.trim()) {
+    if (!/^[\x21-\x7e]{8,300}$/.test(b.key.trim())) return res.status(400).json({ error: 'That does not look like an API key' });
+    next.key = b.key.trim();
+  }
+  if (typeof b.base === 'string' && b.base.trim()) {
+    if (!/^https:\/\/[^\s]+$/i.test(b.base.trim())) return res.status(400).json({ error: 'The address must start with https://' });
+    next.base = b.base.trim().replace(/\/+$/, '');
+  }
+  if (typeof b.model === 'string' && /^[\w.\-:\/]{2,80}$/.test(b.model.trim())) next.model = b.model.trim();
+  savedConfig.ai = next;
+  if (!saveConfigFile()) return res.status(500).json({ error: 'Could not save' });
+  const c = onlineCfg();
+  res.json({ configured: !!c.key, base: c.base, model: c.model, hint: c.key ? '\u2022\u2022\u2022\u2022' + c.key.slice(-4) : '' });
+});
+async function onlineTranscribe(wavFile, job) {
+  const c = onlineCfg();
+  const buf = fs.readFileSync(wavFile);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (job.state === 'cancelled') return [];
+    const fd = new FormData();
+    fd.append('file', new Blob([buf], { type: 'audio/wav' }), 'audio.wav');
+    fd.append('model', c.model);
+    fd.append('response_format', 'verbose_json');
+    fd.append('temperature', '0');
+    const toEn = job.translate && job.langUsed !== 'en';
+    if (!toEn && job.lang && job.lang !== 'auto') fd.append('language', job.lang);
+    else if (!toEn && job.langUsed) fd.append('language', job.langUsed);
+    let r;
+    try {
+      r = await fetch(c.base + (toEn ? '/audio/translations' : '/audio/transcriptions'), { method: 'POST', headers: { Authorization: 'Bearer ' + c.key }, body: fd, signal: AbortSignal.timeout(120000) });
+    } catch (e) {
+      if (attempt === 3) throw new Error('Online AI is not reachable (' + (e.name === 'TimeoutError' ? 'timed out' : 'network error') + ')');
+      await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1))); continue;
+    }
+    if (r.status === 401 || r.status === 403) throw new Error('The API key was rejected. Check it in Settings > Subtitles');
+    if (r.status === 429 || r.status >= 500) {
+      if (attempt === 3) throw new Error('Online AI is busy or out of quota (HTTP ' + r.status + ')');
+      const wait = Math.min(20000, (parseFloat(r.headers.get('retry-after')) || 2 * (attempt + 1)) * 1000);
+      job.msg = 'Online AI is busy \u00b7 waiting'; await new Promise((ok) => setTimeout(ok, wait)); continue;
+    }
+    if (!r.ok) { let m = ''; try { m = ((await r.json()).error || {}).message || ''; } catch (e) {} throw new Error('Online AI error ' + r.status + (m ? ': ' + String(m).slice(0, 120) : '')); }
+    const j = await r.json();
+    return (j.segments || []).map((g) => ({ s: Number(g.start) || 0, e: Number(g.end) || 0, text: String(g.text || '').trim() })).filter((g) => g.text && g.e > g.s);
+  }
+  return [];
+}
 async function aiRun(job) {
-  const bin = findWhisperBin();
-  const modelPath = listWhisperModels().paths.get(job.model);
+  const bin = job.online ? 'online' : findWhisperBin();
+  const modelPath = job.online ? 'online' : listWhisperModels().paths.get(job.model);
   if (!bin || !modelPath) return aiFinish(job, 'error', 'whisper.cpp or its model was not found');
 
   // Language: track tag first; if the file has none, let whisper listen to 30 s from the middle of the episode instead of guessing per chunk.
-  if (job.lang === 'auto' && !job.langUsed && !/\.en\b/.test(job.model) && job.duration > 60) {
+  if (!job.online && job.lang === 'auto' && !job.langUsed && !/\.en\b/.test(job.model) && job.duration > 60) {
     try {
       job.msg = 'Detecting language';
       const lw = path.join(job.workDir || AI_DIR, `lang-${job.key}.wav`);
@@ -1592,9 +1654,10 @@ async function aiRun(job) {
   const cores = os.cpus().length;
   const bigModel = !/tiny/i.test(job.model);
   let workers = Number(savedConfig.whisper && savedConfig.whisper.parallel) || (cores >= 6 && !(bigModel && os.totalmem() < 3e9) ? 2 : 1);
+  if (job.online) workers = 3;                                  // the API does the heavy lifting: send a few slices at once
   workers = Math.max(1, Math.min(3, workers, list.length));
   const threadsEach = Math.max(1, Math.min(4, Number(savedConfig.whisper && savedConfig.whisper.threads) || Math.floor(cores / workers)));
-  const vadModel = findVadModel();
+  const vadModel = job.online ? null : findVadModel();
   job.tier = vadModel && !job.songs ? 0 : 2;               // 0 tuned voice detection, 1 basic, 2 fast flags only, 3 plain
   job.workers = workers; job.vad = !!vadModel;
   let fatal = null;
@@ -1683,6 +1746,12 @@ async function aiRun(job) {
           return aiSpawnWait(job, bin, args, tail).then((r) => { inflight.delete(wid); job.partMs = Date.now() - t0; r.tail = tail.t; return r; });
         };
         const transcribe = async (firstTier) => {
+          if (job.online) {
+            job.msg = 'Online AI · transcribing';
+            const raw = await onlineTranscribe(wavIn, job);
+            if (!alive() || fatal) return null;
+            return { tier: 9, cues: toAbs(raw) };
+          }
           let tier = Math.max(firstTier, job.tier), r = await run(threadsEach, tier);
           // older whisper builds reject some flags: step down one tier (and remember it for the whole job)
           while (alive() && !fatal && r.code !== 0 && !r.signal && tier < 3) {
@@ -1762,19 +1831,20 @@ function aiParams(src) {
   const lang = /^[a-z]{2,3}$|^auto$/.test(String(src.lang || 'auto')) ? String(src.lang || 'auto') : 'auto';
   const translate = src.translate === true || src.translate === '1' || src.translate === 'true';
   const models = listWhisperModels();
+  const online = (src.online === true || src.online === '1' || src.online === 1 || src.online === 'true') && onlineConfigured();
   const mode = String(src.mode) === 'quick' ? 'quick' : 'ai';
   const songs = src.songs === true || src.songs === '1' || src.songs === 1 || src.songs === 'true';   // keep songs / music scenes (no silence cutting, no OP/ED skip, no voice detector)
   // quick = smallest model (fast, rough); ai = the most accurate model that is installed and still practical on a phone
-  const model = models.names.includes(String(src.model || '')) ? String(src.model)
+  const model = online ? 'online:' + onlineCfg().model : models.names.includes(String(src.model || '')) ? String(src.model)
     : mode === 'quick' ? (models.names.find((n) => /tiny/.test(n)) || models.names[models.names.length - 1] || '')
       : (models.names.find((n) => /base/.test(n)) || models.names.find((n) => /small/.test(n)) || models.names[0] || '');
-  return { r, audioTrack, lang, translate, model, mode, songs, key: aiKeyFor(r, audioTrack, lang, translate, model + (mode === 'quick' ? '|quick' : '') + (songs ? '|songs' : '')) };
+  return { r, audioTrack, lang, translate, model, mode, songs, online, key: aiKeyFor(r, audioTrack, lang, translate, model + (mode === 'quick' ? '|quick' : '') + (songs ? '|songs' : '') + (online ? '|online' : '')) };
 }
 
 app.get('/api/ai/capabilities', (req, res) => {
   const bin = findWhisperBin();
   const models = listWhisperModels();
-  res.json({ available: !!bin && models.names.length > 0, bin: !!bin, vad: !!findVadModel(), models: models.names, running: aiPublic(aiRunning), queued: aiQueue.length });
+  res.json({ online: onlineConfigured(), available: (!!bin && models.names.length > 0) || onlineConfigured(), local: !!bin && models.names.length > 0, bin: !!bin, vad: !!findVadModel(), models: models.names, running: aiPublic(aiRunning), queued: aiQueue.length });
 });
 
 app.get('/api/ai/subs', (req, res) => {
@@ -1806,7 +1876,9 @@ app.post('/api/ai/subs/remove', (req, res) => {
 });
 
 app.post('/api/ai/subs', (req, res) => {
-  if (!findWhisperBin() || !listWhisperModels().names.length) return res.status(501).json({ error: 'whisper.cpp / model not installed (see README)' });
+  const wantOnline = req.body && (req.body.online === true || req.body.online === '1' || req.body.online === 1 || req.body.online === 'true');
+  if (wantOnline && !onlineConfigured()) return res.status(400).json({ error: 'Add an API key in Settings > Subtitles first' });
+  if (!wantOnline && (!findWhisperBin() || !listWhisperModels().names.length)) return res.status(501).json({ error: 'whisper.cpp / model not installed (see README)' });
   const p = aiParams(req.body || {});
   if (p.error) return res.status(p.status).json({ error: p.error });
   if (req.body && req.body.force && !aiJobs.has(p.key)) aiRemove(p.key);          // "Generate again": throw the old result away first
@@ -1818,7 +1890,7 @@ app.post('/api/ai/subs', (req, res) => {
     }
     return res.json(aiPublic(existing));
   }
-  const job = { from: Math.max(0, parseFloat(req.body.from) || 0), key: p.key, path: p.r.path, relPath: String(req.body.file), audioTrack: p.audioTrack, lang: p.lang, translate: p.translate, mode: p.mode, songs: p.songs,
+  const job = { from: Math.max(0, parseFloat(req.body.from) || 0), key: p.key, path: p.r.path, relPath: String(req.body.file), audioTrack: p.audioTrack, lang: p.lang, translate: p.translate, mode: p.mode, songs: p.songs, online: p.online,
     model: p.model, sig: { size: p.r.stat.size, mtimeMs: p.r.stat.mtimeMs }, createdAt: Date.now(), state: 'queued', pct: 0, msg: 'Waiting in queue', duration: 0, proc: null };
   aiJobs.set(p.key, job);
   if (req.body && req.body.priority) aiQueue.unshift(p.key); else aiQueue.push(p.key);
@@ -1909,6 +1981,7 @@ app.get('/api/tasks', (req, res) => {
       state: isTranscodeFrozen ? 'paused' : 'running', pct: null, detail: `${transcodeStats.height || ''}p \u00b7 speed ${transcodeStats.speed ? transcodeStats.speed.toFixed(2) + 'x' : '\u2026'}`,
       canStop: true, canClear: false, meta: transcodeStats.quality || '', created: Date.now() });
   }
+  onlineTasks.forEach((t) => tasks.push(t));
   if (thumbQueue.length || thumbRunning) {
     tasks.push({ id: 'thumbs', type: 'thumbs', title: 'Thumbnails', label: 'Thumbnail generation', state: 'running', pct: null, detail: `${thumbQueue.length + (thumbRunning ? 1 : 0)} left`, canStop: true, canClear: false, meta: '', created: Date.now() });
   }
@@ -1936,7 +2009,8 @@ app.post('/api/tasks/stop', (req, res) => {
   }
   res.json({ ok: stopTask(id) });
 });
-app.post('/api/tasks/clear', (req, res) => {          // remove finished entries (keeps the subtitle files)
+app.post('/api/tasks/clear', (req, res) => {
+  onlineTasks.forEach((t, k) => { if (t.state !== "running") onlineTasks.delete(k); });          // remove finished entries (keeps the subtitle files)
   Array.from(aiJobs.entries()).forEach(([k, j]) => { if (!['queued', 'extracting', 'transcribing'].includes(j.state)) aiJobs.delete(k); });
   res.json({ ok: true });
 });
@@ -1962,7 +2036,7 @@ app.get('/stream', (req, res) => {
   markInteractive(8000);
   const fileSize = r.stat.size;
   const contentType = CONTENT_TYPES[path.extname(r.path).toLowerCase()] || 'video/mp4';
-  const CHUNK_SIZE = 1024 * 1024 * 8;
+  const CHUNK_SIZE = 1024 * 1024 * 64;      // open-ended ranges: let the browser read well ahead (a deep buffer); it still applies its own back-pressure
   try { req.socket.setNoDelay(true); req.socket.setKeepAlive(true, 30000); } catch (e) {}
   const range = req.headers.range;
 
@@ -2298,6 +2372,55 @@ app.get('/api/thumb', (req, res) => {
   });
 });
 
+
+
+/* ---- Custom thumbnails from config.json ----
+   "thumbnails": [ { "path": "/sdcard/.anime/darling in franxx S01", "thumbnail": "/sdcard/download/franxx.png" } ]
+   A path may be absolute (any /sdcard, /storage/emulated/0 or ~/storage/shared spelling) or relative to the media folder. */
+const THUMB_IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif']);
+const IMG_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp', '.avif': 'image/avif' };
+function normThumbPath(p) {
+  let x = String(p || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase();
+  x = x.replace(/^~\/storage\/shared/, '').replace(/^.*\/storage\/shared(?=\/|$)/, '').replace(/^\/storage\/emulated\/\d+/, '').replace(/^\/sdcard\d*/, '').replace(/^\/mnt\/sdcard/, '');
+  return x;
+}
+function thumbEntries() {
+  const raw = savedConfig.thumbnails;
+  const list = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? Object.entries(raw).map(([path, thumbnail]) => ({ path, thumbnail })) : []);
+  return list.filter((e) => e && typeof e.path === 'string' && typeof e.thumbnail === 'string');
+}
+function customThumbFor(key) {
+  const entries = thumbEntries(); if (!entries.length) return null;
+  const rel = String(key || '').split(' / ').filter((t) => t && t !== 'Anime Root').join('/');
+  const abs = normThumbPath(path.join(MEDIA_ROOT, rel));
+  const relN = rel.toLowerCase();
+  for (const e of entries) {
+    const n = normThumbPath(e.path);
+    if (n === abs || (n && relN && (n === '/' + relN || n.endsWith('/' + relN) || relN === n.replace(/^\//, '')))) {
+      let f = e.thumbnail.replace(/^~(?=\/)/, os.homedir());
+      if (!path.isAbsolute(f)) f = path.join(__dirname, f);
+      const cands = [f];
+      const n2 = normThumbPath(f);
+      if (/^\/sdcard|^\/storage\/emulated/.test(f)) cands.push(path.join(STORAGE_SHARED, n2));          // Termux: /sdcard may not exist, ~/storage/shared does
+      for (const c of cands) {
+        try { if (THUMB_IMG_EXTS.has(path.extname(c).toLowerCase()) && fs.statSync(c).isFile() && fs.statSync(c).size < 12 * 1024 * 1024) return c; } catch (x) {}
+      }
+    }
+  }
+  return null;
+}
+app.get('/api/thumbs/custom', (req, res) => {
+  const keys = Object.keys(getLibrary()).filter((k) => customThumbFor(k));
+  res.json({ keys });
+});
+app.get('/api/thumb/custom', (req, res) => {
+  const f = customThumbFor(req.query.key);
+  if (!f) return res.status(404).end();
+  res.setHeader('Content-Type', IMG_TYPES[path.extname(f).toLowerCase()] || 'application/octet-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  fs.createReadStream(f).on('error', () => res.end()).pipe(res);
+});
+
 app.post('/api/thumbs/clear', (req, res) => {
   let n = 0;
   try {
@@ -2305,6 +2428,175 @@ app.post('/api/thumbs/clear', (req, res) => {
   } catch (e) {}
   thumbFailed.clear();
   res.json({ status: 'cleared', removed: n });
+});
+
+
+/* ------------------------------------------------------------------ */
+/* Online metadata & official artwork (Series/Playlist only, IPv4)    */
+/* ------------------------------------------------------------------ */
+const ONLINE_META_DIR = path.join(CACHE_DIR, "online_meta");
+try { fs.mkdirSync(ONLINE_META_DIR, { recursive: true }); } catch (e) {}
+const onlineTasks = new Map();
+const onlineInFlight = new Map();
+
+async function queryAnimeArtwork(clean, qRes) {
+  // 1. Try AniList GraphQL first for clean vertical cover images
+  try {
+    const gql = `query ($s: String) { Media(search: $s, type: ANIME) { title { english romaji } coverImage { extraLarge large medium } description(asHtml: false) } }`;
+    const r2 = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ query: gql, variables: { s: clean } }),
+      signal: AbortSignal.timeout(12000)
+    });
+    if (r2.ok) {
+      const j2 = await r2.json();
+      const m = j2 && j2.data && j2.data.Media;
+      if (m && m.coverImage) {
+        const remoteUrl = (qRes === "480p" ? (m.coverImage.extraLarge || m.coverImage.large) : (m.coverImage.large || m.coverImage.medium)) || "";
+        if (remoteUrl) {
+          return {
+            title: m.title.english || m.title.romaji || clean,
+            remoteUrl,
+            synopsis: String(m.description || "").replace(/<[^>]+>/g, "").slice(0, 260)
+          };
+        }
+      }
+    }
+  } catch (e) {}
+
+  // 2. Fallback: Jikan (MAL) vertical images
+  try {
+    const url = `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(clean)}&limit=1`;
+    const r = await fetch(url, {
+      headers: { "User-Agent": "AstraPlayer/1.26 (Android; Termux)", "Accept": "application/json" },
+      signal: AbortSignal.timeout(12000)
+    });
+    if (r.ok) {
+      const json = await r.json();
+      const hit = json && json.data && json.data[0];
+      if (hit && hit.images && hit.images.jpg) {
+        const remoteUrl = hit.images.jpg.large_image_url || hit.images.jpg.image_url || "";
+        if (remoteUrl) {
+          return {
+            title: hit.title_english || hit.title || clean,
+            remoteUrl,
+            synopsis: String(hit.synopsis || "").slice(0, 260)
+          };
+        }
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+app.get("/api/meta/online", async (req, res) => {
+  const rawTitle = String(req.query.title || "").trim();
+  const qRes = req.query.q === "480p" ? "480p" : "360p";
+  if (!rawTitle) return res.json({ found: false });
+
+
+  const baseName = rawTitle.split("/")[0].replace(/\b(season|s)\s*0*\d+\b/gi, "").trim();
+  if (/^youtube$|^downloads$|^videos$|^telegram$/i.test(baseName)) {
+    return res.json({ found: false, isYoutube: true });
+  }
+  const clean = parseMediaName(baseName).title || baseName;
+
+  const slug = crypto.createHash("sha1").update(`${clean.toLowerCase()}|${qRes}`).digest("hex");
+  const cacheFile = path.join(ONLINE_META_DIR, `${slug}.json`);
+  const imgFile = path.join(ONLINE_META_DIR, `${slug}.jpg`);
+
+  try {
+    if (fs.existsSync(cacheFile)) {
+      const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+      if (cached.found && fs.existsSync(imgFile)) {
+        cached.localUrl = `/api/meta/online/img?slug=${slug}`;
+        return res.json(cached);
+      }
+    }
+  } catch (e) {}
+
+  if (onlineInFlight.has(slug)) {
+    return res.json(await onlineInFlight.get(slug));
+  }
+
+  const jobPromise = (async () => {
+    const taskId = `online:${slug}`;
+    onlineTasks.set(taskId, {
+      id: taskId,
+      type: "online",
+      title: `Playlist Cover: ${clean}`,
+      label: `Online Cover (${qRes})`,
+      state: "running",
+      pct: 30,
+      detail: "Searching playlist cover...",
+      meta: qRes,
+      canStop: false,
+      canClear: true,
+      created: Date.now()
+    });
+    log("ONLINE", `Fetching ${qRes} playlist cover for: "${clean}"`);
+
+    try {
+      const hit = await queryAnimeArtwork(clean, qRes);
+      if (!hit) {
+        const msg = `No match found for "${clean}"`;
+        log("WARN", `[ONLINE] ${msg}`);
+        onlineTasks.set(taskId, { ...onlineTasks.get(taskId), state: "error", pct: 100, msg, detail: msg });
+        return { found: false, title: clean, error: msg };
+      }
+
+      onlineTasks.set(taskId, { ...onlineTasks.get(taskId), pct: 70, detail: `Downloading ${qRes} cover...` });
+      const imgRes = await fetch(hit.remoteUrl, { signal: AbortSignal.timeout(15000) });
+      if (!imgRes.ok) throw new Error(`Image HTTP ${imgRes.status}`);
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      fs.writeFileSync(imgFile, buf);
+
+      const payload = {
+        found: true,
+        title: hit.title,
+        localUrl: `/api/meta/online/img?slug=${slug}`,
+        synopsis: hit.synopsis,
+        quality: qRes
+      };
+      fs.writeFileSync(cacheFile, JSON.stringify(payload));
+      const sizeKB = Math.round(buf.length / 1024);
+      log("ONLINE", `Saved ${qRes} cover for "${payload.title}" (${sizeKB} KB)`);
+      onlineTasks.set(taskId, {
+        ...onlineTasks.get(taskId),
+        state: "done",
+        pct: 100,
+        detail: `Downloaded ${qRes} (${sizeKB} KB)`
+      });
+      return payload;
+    } catch (e) {
+      const errMsg = e && e.message ? e.message : "Network error";
+      log("ERROR", `[ONLINE] Failed for "${clean}": ${errMsg}`);
+      onlineTasks.set(taskId, {
+        ...onlineTasks.get(taskId),
+        state: "error",
+        pct: 100,
+        msg: errMsg,
+        detail: errMsg
+      });
+      return { found: false, title: clean, error: errMsg };
+    } finally {
+      onlineInFlight.delete(slug);
+    }
+  })();
+
+  onlineInFlight.set(slug, jobPromise);
+  res.json(await jobPromise);
+});
+
+app.get("/api/meta/online/img", (req, res) => {
+  const slug = String(req.query.slug || "");
+  if (!/^[0-9a-f]{40}$/.test(slug)) return res.status(400).end();
+  const imgFile = path.join(ONLINE_META_DIR, `${slug}.jpg`);
+  if (!fs.existsSync(imgFile)) return res.status(404).end();
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Cache-Control", "public, max-age=604800");
+  fs.createReadStream(imgFile).pipe(res);
 });
 
 /* ------------------------------------------------------------------ */

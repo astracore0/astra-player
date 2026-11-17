@@ -1,5 +1,15 @@
 # Changelog
 
+Versions after 1.20.0 are the "1.21.x-flow" line: 1.21.1, 1.21.2, ... (never 1.22.0). 1.21.1-1.21.5 are the design (flow) updates; this one merges them with the engine work.
+
+## v1.21.6-flow
+- Merged the 1.21.5-flow design (online covers with Network mode, paused-info overlay, chapter pill, prev/next in the control bar) with the engine: ASS/SRT styling, speed pass, songs switch, Low-memory mode, setup.sh clone.
+- Buffer: open-ended range requests are now served up to 64 MB (was 8 MB), so the browser keeps a deep buffer ahead like before. 8-bit direct play never waits more than 20 s for the pre-buffer; 10-bit keeps its 5 s head start.
+- Online AI subtitles (optional): Settings > Online AI subtitles (service Groq / OpenAI / custom, API key, model). Then the subtitle maker shows an "Online AI" switch. Only the 2-minute audio slices are sent; the key stays in config.json (never sent back to the page, never logged).
+- Custom cover thumbnails from config.json (see README "Custom thumbnails"); they win over online covers and frames.
+- Player bar under the video: Previous / Next (with the episode name) and an "Animation on / No animation" switch.
+- New switch and button design (ON/OFF marks, glow, pressed state, focus ring).
+
 ## v1.21.0
 - AI subtitles: the denoiser is gone (it treated singing / background music as noise and removed those lines); speech is lifted with a band-pass + level normaliser instead. New switch **Include songs & music scenes**: no OP/ED skipping, no silence cutting, no voice detector - lyrics and music-scene dialogue are read too (cached separately from the normal one).
 - setup.sh clones the repo itself: curl -fsSL https://raw.githubusercontent.com/astracore0/astra-player/main/setup.sh | bash  (options --dir, --branch, --repo, --update).

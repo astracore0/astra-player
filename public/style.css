@@ -936,3 +936,770 @@ body.fake-fs-on { overflow: hidden; }
 /* low-memory mode: no effects */
 html.lite *, html.lite *::before, html.lite *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; box-shadow: none !important; will-change: auto !important; }
 html.lite .history-thumb::after, html.lite .shimmer { display: none !important; }
+
+
+/* ===== v1.21 UI pass ===== */
+/* Empty player: no controls floating over a black box */
+.player-empty { display: none; position: absolute; inset: 0; z-index: 12; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--text-2); text-align: center; padding: 16px; background: radial-gradient(120% 120% at 50% 0%, var(--surface-2), #000 70%); }
+.player-empty b { color: #fff; font-size: 1rem; }
+.player-empty span { font-size: .8rem; color: var(--muted); }
+.player-empty svg { color: var(--accent); margin-bottom: 4px; }
+.player-wrapper.no-video .player-empty { display: flex; }
+.player-wrapper.no-video .overlay, .player-wrapper.no-video .touch-zones-container, .player-wrapper.no-video .manual-center-play { display: none !important; }
+
+/* Series title with logo, no toggle */
+.shelf-title { display: flex; align-items: center; gap: 9px; font-size: 1.02rem; min-width: 0; }
+.shelf-title svg { flex: none; color: var(--accent); }
+.shelf-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Seasons: right below the player, with a divider line */
+.q-seasons { margin: 0 0 14px; padding: 12px 0 14px; border-bottom: 1px solid var(--line); border-top: 1px solid var(--line); gap: 8px; }
+.q-seasons .chip-preset { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px; }
+.q-seasons .chip-preset svg { flex: none; opacity: .85; }
+#view-player .shelf-section { margin-top: 0 !important; }
+#playerSeasons:empty { display: none; }
+#playerSeasons .q-seasons { margin-top: 0; }
+
+/* Episodes: always a vertical, wrapping grid */
+.q-list.q-v { flex-wrap: wrap; }
+.q-list.q-v .q-card { flex: 0 0 calc((100% - 20px) / 3); }
+
+/* Player menu: bottom sheet on phones, tidier cards and rows everywhere */
+.settings-modal { border-radius: 18px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); background: color-mix(in srgb, var(--surface) 94%, transparent); }
+.modal-tabs { padding: 6px 6px 0; gap: 4px; }
+.tab-btn { flex-direction: column; gap: 3px; padding: 9px 4px 8px; font-size: .68rem; border-radius: 12px 12px 0 0; }
+.tab-btn svg { width: 18px; height: 18px; }
+.tab-btn.active { background: var(--accent-soft); }
+.modal-close { border-radius: 12px; margin: 0 0 6px 4px; width: 40px; border-left: 0; background: var(--surface-2); }
+.tab-body { gap: 10px; padding: 14px 14px 18px; }
+.opt-row { border-radius: 12px; padding: 12px 14px; }
+@media (max-width: 640px) {
+  .settings-modal { left: 0; right: 0; bottom: 0; width: 100%; max-width: 100%; max-height: min(78vh, 560px); border-radius: 20px 20px 0 0; border-width: 1px 0 0; padding-bottom: var(--safe-b); }
+  .settings-modal::before { content: ""; display: block; width: 38px; height: 4px; border-radius: 4px; background: var(--line); margin: 8px auto 0; flex: none; }
+  .player-wrapper.fake-fs .settings-modal { left: auto; right: 10px; width: 320px; border-radius: var(--r-m); border-width: 1px; }
+  .player-wrapper.fake-fs .settings-modal::before { display: none; }
+}
+
+
+/* ===== v1.21 subtitle style page + row actions ===== */
+.settings-modal { position: fixed; }
+.sub-page { display: none; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.settings-modal.sub-open .modal-tabs, .settings-modal.sub-open .tab-body { display: none !important; }
+.settings-modal.sub-open .sub-page { display: flex; animation: subPageIn .26s var(--ease); }
+@keyframes subPageIn { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+.sub-page-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--bg); flex: none; }
+.sub-page-head h6 { margin: 0; flex: 1; font-size: .95rem; font-weight: 700; }
+.sub-page-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px; }
+.sub-page-body #subStyleSection { border: 0 !important; background: transparent; padding: 0 !important; }
+.tab-body.show { animation: fade .25s ease; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .settings-modal.sub-open .sub-page { animation: none; } }
+
+.opt-row .sub-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-act { display: none; gap: 6px; flex: none; margin-left: auto; }
+.opt-row.selected .row-act { display: inline-flex; }
+.row-act-btn { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border-radius: 9px; border: 1px solid var(--line); background: var(--surface-2); color: #fff; cursor: pointer; padding: 0; }
+.row-act-btn:hover { border-color: var(--accent); }
+.row-act-btn.ra-del { color: var(--danger); }
+.row-act-btn.ra-del:hover { background: var(--danger-soft); border-color: var(--danger); }
+.row-act-btn:active { transform: scale(.9); }
+.opt-row:not([data-ai-key]):not([data-ext-path]) .row-act .ra-del { display: none; }
+
+
+/* ===== v1.21.2 queue header, season boxes, episode cards ===== */
+.queue-head { display: flex; flex-direction: column; gap: 14px; padding: 14px 0 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.quick-toggles { display: flex; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.quick-toggles .switch-row { flex: 1; justify-content: space-between; padding: 12px 16px; font-size: .86rem; }
+.quick-toggles .switch-row span { order: -1; font-weight: 700; color: var(--text, #fff); }
+.qt-sep { width: 1px; align-self: stretch; background: var(--line); margin: 9px 0; }
+.queue-head .shelf-title { margin: 0; font-size: 1.1rem; }
+.shelf-title small { margin-left: auto; flex: none; font-size: .74rem; font-weight: 600; color: var(--muted); }
+#view-player .shelf-section { margin-top: 0 !important; }
+
+.season-row { display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none; margin: 0 -16px; padding: 2px 16px; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+.season-row::-webkit-scrollbar { display: none; }
+.season-box { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 124px; padding: 10px 16px 10px 14px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--line); color: #fff; cursor: pointer; text-align: left; scroll-snap-align: start; transition: border-color .15s, background .15s, transform .12s; }
+.season-box:active { transform: scale(.96); }
+.sb-name { max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .95rem; font-weight: 800; }
+.sb-sub { display: inline-flex; align-items: center; gap: 5px; font-size: .7rem; font-weight: 600; color: var(--muted); }
+.sb-sub svg { width: 12px; height: 12px; }
+.season-box.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent) inset; }
+.season-box.active .sb-sub { color: var(--accent); }
+
+.q-list { gap: 12px; }
+.q-list.q-v .q-card { flex: 0 0 calc((100% - 12px) / 2); }
+@media (min-width: 560px) { .q-list.q-v .q-card { flex-basis: calc((100% - 24px) / 3); } }
+@media (min-width: 900px) { .q-list.q-v .q-card { flex-basis: calc((100% - 36px) / 4); } }
+.q-card { border-radius: 14px; background: var(--surface); }
+.q-thumb::after { content: ""; position: absolute; inset: auto 0 0 0; height: 40%; background: linear-gradient(0deg, rgba(0,0,0,.45), transparent); pointer-events: none; }
+.q-name { display: flex; align-items: baseline; gap: 6px; padding: 10px 11px 11px; font-size: .78rem; white-space: nowrap; overflow: hidden; }
+.q-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 700; }
+.q-ep { flex: none; font-weight: 700; color: var(--muted); }
+.q-card.playing { box-shadow: 0 0 0 1px var(--accent) inset, 0 6px 22px rgba(77, 141, 255, .22); }
+.q-card.playing .q-ep { color: var(--accent); }
+.q-now { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px 3px 7px; }
+.q-now i { width: 3px; height: 9px; border-radius: 2px; background: #fff; animation: eq .9s ease-in-out infinite; }
+.q-now i:nth-child(2) { animation-delay: .2s; height: 12px; }
+.q-now i:nth-child(3) { animation-delay: .4s; }
+@keyframes eq { 0%, 100% { transform: scaleY(.4); } 50% { transform: scaleY(1); } }
+@media (prefers-reduced-motion: reduce) { .q-now i { animation: none; } }
+
+
+/* ===== v1.22 custom dropdowns, color picker, dialog, checkboxes ===== */
+.cs { position: relative; display: inline-flex; min-width: 112px; max-width: 58%; }
+.ai-row .cs { flex: 1 1 120px; min-width: 0; max-width: none; }
+.setting-item .cs { flex: none; }
+.slider-row label .cs { vertical-align: middle; }
+.cs-native { position: absolute !important; width: 1px !important; height: 1px !important; opacity: 0 !important; pointer-events: none !important; overflow: hidden; }
+.cs-btn { display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 38px; padding: 8px 10px 8px 12px; border-radius: 10px; border: 1px solid var(--line); background: #0b0e16; color: #e6ebf7; font-size: .8rem; font-weight: 600; cursor: pointer; text-align: left; transition: border-color .15s, background .15s; }
+.cs-btn:hover, .cs-btn.open { border-color: var(--accent); }
+.cs-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-chev { flex: none; color: var(--muted); transition: transform .18s var(--ease); }
+.cs-btn.open .cs-chev { transform: rotate(180deg); color: #fff; }
+
+.cs-menu { z-index: 520; display: flex; flex-direction: column; gap: 2px; padding: 6px; border-radius: 12px; background: #090b11; border: 1px solid rgba(255,255,255,.09); box-shadow: 0 14px 38px rgba(0,0,0,.7); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; animation: csIn .15s var(--ease); transform-origin: top center; }
+.cs-menu[data-dir="up"] { transform-origin: bottom center; }
+@keyframes csIn { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+.cs-opt { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 12px; border: 0; border-radius: 8px; background: transparent; color: #b4bdd3; font-size: .78rem; font-weight: 600; text-align: left; cursor: pointer; }
+.cs-opt:hover, .cs-opt:focus-visible { background: rgba(255,255,255,.07); color: #fff; outline: 0; }
+.cs-opt.on { color: #fff; background: var(--accent-soft); }
+.cs-check { flex: none; color: var(--accent); opacity: 0; }
+.cs-opt.on .cs-check { opacity: 1; }
+.cs-opt:disabled { opacity: .4; cursor: default; }
+
+.cc-btn { width: 34px; height: 34px; padding: 4px; border-radius: 9px; border: 1px solid var(--line); background: #0b0e16; cursor: pointer; display: inline-flex; vertical-align: middle; }
+.cc-btn i { flex: 1; border-radius: 5px; border: 1px solid rgba(255,255,255,.25); }
+.cc-btn:hover, .cc-btn.open { border-color: var(--accent); }
+.cs-menu.cc-menu { padding: 10px; gap: 10px; width: 214px; }
+.cc-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.cc-sw.cs-opt { width: 100%; aspect-ratio: 1; padding: 0; border-radius: 50%; border: 2px solid rgba(255,255,255,.2); }
+.cc-sw.cs-opt.on { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
+.cc-hex { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: #0b0e16; color: #fff; font: 600 .8rem ui-monospace, Menlo, monospace; }
+.cc-hex:focus { outline: 0; border-color: var(--accent); }
+
+.dlg-scrim { position: fixed; inset: 0; z-index: 600; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,0); transition: background .16s; }
+.dlg-scrim.on { background: rgba(0,0,0,.6); }
+.dlg { width: min(360px, 100%); padding: 20px; border-radius: 18px; background: #0d111b; border: 1px solid rgba(255,255,255,.1); box-shadow: 0 20px 60px rgba(0,0,0,.7); opacity: 0; transform: translateY(10px) scale(.97); transition: opacity .16s, transform .2s var(--ease); }
+.dlg-scrim.on .dlg { opacity: 1; transform: none; }
+.dlg h4 { margin: 0 0 6px; font-size: 1.05rem; }
+.dlg p { margin: 0 0 18px; color: var(--muted); font-size: .86rem; line-height: 1.45; }
+.dlg-act { display: flex; gap: 10px; justify-content: flex-end; }
+.dlg-act .pill-btn { min-width: 96px; justify-content: center; }
+@media (prefers-reduced-motion: reduce) { .cs-menu, .dlg, .dlg-scrim { animation: none; transition: none; } }
+
+/* Checkboxes in the subtitle look page */
+.checkbox-row label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.checkbox-row input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 20px; height: 20px; margin: 0; border-radius: 6px; border: 1.5px solid var(--muted); background: #0b0e16; display: inline-grid; place-content: center; cursor: pointer; transition: background .15s, border-color .15s; }
+.checkbox-row input[type="checkbox"]::after { content: ""; width: 10px; height: 6px; border: solid #fff; border-width: 0 0 2.5px 2.5px; transform: rotate(-45deg) scale(0); margin-top: -2px; transition: transform .14s var(--ease); }
+.checkbox-row input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+.checkbox-row input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
+.checkbox-row input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Number boxes without the browser spinners */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+
+/* ===== v1.22.1 pre-buffer dropdown + keypad ===== */
+.mem-pick .cs { max-width: none; width: 100%; }
+.kp { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 14px; background: #090b11; border: 1px solid rgba(255,255,255,.09); outline: 0; animation: kpIn .22s var(--ease); }
+@keyframes kpIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.kp:focus-visible { border-color: var(--accent); }
+.kp-top { display: flex; align-items: center; gap: 10px; }
+.kp-disp { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border-radius: 10px; background: #0b0e16; border: 1px solid var(--line); overflow: hidden; }
+.kp-val { font: 800 1.5rem ui-monospace, Menlo, monospace; color: #fff; overflow: hidden; text-overflow: ellipsis; }
+.kp-val.ph { color: var(--muted); }
+.kp-u { font-size: .8rem; font-weight: 700; color: var(--accent); }
+.kp-units { display: inline-flex; padding: 3px; gap: 3px; border-radius: 10px; background: #0b0e16; border: 1px solid var(--line); }
+.kp-units button { border: 0; padding: 8px 12px; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 700; font-size: .78rem; cursor: pointer; }
+.kp-units button.on { background: var(--accent); color: #fff; }
+.kp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.kp-key { height: 48px; border-radius: 12px; border: 1px solid var(--line); background: #0f1420; color: #fff; font-size: 1.15rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; touch-action: manipulation; transition: background .12s, transform .1s; }
+.kp-key:hover { background: #161d2e; }
+.kp-key:active { transform: scale(.94); background: var(--accent-soft); }
+.kp-foot { display: flex; gap: 8px; }
+.kp-foot .pill-btn { flex: 1; justify-content: center; min-height: 42px; }
+@media (prefers-reduced-motion: reduce) { .kp { animation: none; } }
+
+
+/* ===== v1.23.2 fullscreen only: the settings box is 1.35x bigger, buttons and options stay normal size =====
+   So the same controls take less room and more of them are visible at once.
+   Same anchor as before (bottom-right, above the controls); the size is capped to the screen. */
+#playerWrapper:fullscreen .settings-modal, #playerWrapper:-webkit-full-screen .settings-modal, #playerWrapper.fake-fs .settings-modal {
+  --mw: 513px;
+  max-width: none;
+  width: min(var(--mw), calc(100% - 16px));
+  height: min(378px, calc(100% - 64px));
+}
+@media (max-width: 640px) { #playerWrapper.fake-fs .settings-modal { --mw: 432px; } }
+
+/* ===== v1.21.1: buttons, switches, player bar ===== */
+/* No-animation switch uses the same rules as Low-memory mode */
+html.no-anim *, html.no-anim *::before, html.no-anim *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+
+/* Switches: clear ON / OFF state (colour + glow + mark), same look everywhere */
+.switch { width: 54px; height: 30px; }
+.switch span { background: #1b2336; box-shadow: inset 0 0 0 1.5px var(--line); border-radius: 30px; transition: background .22s, box-shadow .22s; }
+.switch span::before { content: "OFF"; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font: 800 .54rem/1 inherit; letter-spacing: .04em; color: var(--muted); transition: opacity .2s; }
+.switch span::after { top: 4px; left: 4px; width: 22px; height: 22px; background: #8a96b1; box-shadow: 0 2px 6px rgba(0,0,0,.45); transition: transform .24s var(--ease), background .2s; }
+.switch input:checked + span { background: linear-gradient(135deg, var(--accent), #6aa5ff); box-shadow: 0 0 0 1.5px var(--accent), 0 0 14px rgba(77,141,255,.45); }
+.switch input:checked + span::before { content: "ON"; left: 9px; right: auto; color: #fff; }
+.switch input:checked + span::after { transform: translateX(24px); background: #fff; }
+.switch input:focus-visible + span { outline: 2px solid #fff; outline-offset: 2px; }
+.switch input:active + span::after { width: 26px; }
+.switch input:checked:active + span::after { transform: translateX(20px); }
+
+.tgl { width: 42px; height: 24px; border-radius: 24px; background: #1b2336; border: 0; box-shadow: inset 0 0 0 1.5px var(--line); transition: background .22s, box-shadow .22s; }
+.tgl::after { top: 3px; left: 3px; width: 18px; height: 18px; background: #8a96b1; box-shadow: 0 2px 5px rgba(0,0,0,.45); transition: transform .24s var(--ease), background .2s; }
+.switch-row input:checked + .tgl { background: linear-gradient(135deg, var(--accent), #6aa5ff); border: 0; box-shadow: 0 0 0 1.5px var(--accent), 0 0 12px rgba(77,141,255,.4); }
+.switch-row input:checked + .tgl::after { transform: translateX(18px); background: #fff; }
+.switch-row input:focus-visible + .tgl { outline: 2px solid #fff; outline-offset: 2px; }
+.switch-row.dim { opacity: .55; }
+.switch-row small { color: var(--muted); font-weight: 500; }
+
+/* Buttons: one pressed feel, clearer primary / danger */
+.pill-btn, .action-btn, .chip-preset, .nav-btn, .anim-seg button { -webkit-tap-highlight-color: transparent; transition: transform .12s var(--ease), background .16s, border-color .16s, box-shadow .16s, opacity .16s; }
+.pill-btn:active, .action-btn:active, .chip-preset:active, .nav-btn:active:not(:disabled) { transform: scale(.95); }
+.pill-btn.highlight { background: linear-gradient(135deg, var(--accent), #6aa5ff); border-color: transparent; color: #fff; box-shadow: 0 4px 14px rgba(77,141,255,.35); }
+.pill-btn.danger { background: var(--danger-soft); border-color: rgba(255,93,115,.45); color: var(--danger); }
+.pill-btn:focus-visible, .action-btn:focus-visible, .chip-preset:focus-visible, .nav-btn:focus-visible, .anim-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Previous / animation / Next bar under the player */
+.player-bar { display: flex; align-items: stretch; gap: 10px; margin: 12px 0 4px; }
+.nav-btn { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); cursor: pointer; text-align: left; font: inherit; }
+.nav-btn.next { justify-content: flex-end; text-align: right; background: linear-gradient(135deg, rgba(77,141,255,.22), rgba(77,141,255,.08)); border-color: rgba(77,141,255,.55); }
+.nav-btn svg { flex: none; color: var(--accent); }
+.nav-btn .nb-t { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.nav-btn b { font-size: .86rem; }
+.nav-btn small { font-size: .68rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-btn:hover:not(:disabled) { border-color: var(--accent); }
+.nav-btn:disabled { opacity: .4; cursor: default; }
+.anim-seg { flex: none; display: flex; flex-direction: column; border-radius: 14px; border: 1px solid var(--line); overflow: hidden; background: var(--surface); }
+.anim-seg button { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border: 0; background: transparent; color: var(--muted); font: 700 .68rem/1.2 inherit; cursor: pointer; white-space: nowrap; flex: 1; }
+.anim-seg button.on { background: var(--accent-soft); color: var(--accent); }
+.anim-seg button + button { border-top: 1px solid var(--line); }
+@media (max-width: 560px) {
+  .player-bar { flex-wrap: wrap; }
+  .anim-seg { order: 3; flex: 1 1 100%; flex-direction: row; }
+  .anim-seg button { justify-content: center; }
+  .anim-seg button + button { border-top: 0; border-left: 1px solid var(--line); }
+  .nav-btn { padding: 9px 11px; }
+}
+
+/* Online AI card */
+.badge-opt { font-size: .6rem; font-weight: 700; padding: 2px 7px; border-radius: 20px; background: var(--accent-soft); color: var(--accent); vertical-align: middle; margin-left: 6px; }
+.oa-body { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.oa-f { display: flex; flex-direction: column; gap: 5px; font-size: .74rem; color: var(--text-2); }
+.oa-f .text-in { width: 100%; box-sizing: border-box; }
+.oa-key { display: flex; gap: 6px; align-items: center; }
+.oa-key .text-in { flex: 1; }
+.oa-act { display: flex; gap: 8px; justify-content: flex-end; }
+
+
+/* ===== v1.24.1 UI upgrades: Clean Paused Vignette, Hide Subs on Pause, Thin Seekbar, Normal vs Fullscreen Sizing ===== */
+
+/* 1. Hide subtitles when paused info overlay is showing */
+.player-wrapper.is-paused-ui .custom-subtitle-display,
+.player-wrapper.is-paused-ui #subTopBox,
+.player-wrapper.is-paused-ui .sub-pos-layer {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  transition: opacity 0.18s ease;
+}
+
+/* 2. No blur on video — crisp dark cinematic vignette instead */
+.player-wrapper.is-paused-ui .gl-viewport {
+  filter: brightness(0.58) !important;
+  transition: filter 0.25s ease;
+}
+.player-wrapper.is-paused-ui::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(4, 7, 14, 0.86) 0%, rgba(4, 7, 14, 0.45) 52%, rgba(4, 7, 14, 0.15) 100%);
+}
+
+/* 3. Paused Info Overlay — Normal Screen vs Fullscreen Sizing */
+.paused-info-layer {
+  position: absolute;
+  left: 16px;
+  top: 24%;
+  max-width: 78%;
+  z-index: 16;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.22s ease, transform 0.22s var(--ease);
+}
+.player-wrapper.is-paused-ui .paused-info-layer {
+  opacity: 1;
+  transform: none;
+}
+.paused-series-badge {
+  display: inline-block;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.18);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  padding: 2px 7px;
+  border-radius: 5px;
+  margin-bottom: 5px;
+}
+.paused-anime-title {
+  font-size: 1.05rem;
+  font-weight: 800;
+  line-height: 1.18;
+  color: #fff;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.85);
+}
+.paused-meta-row {
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--mint);
+  margin: 4px 0;
+}
+.paused-ep-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.85);
+}
+
+/* Fullscreen scaling for Paused Info Overlay */
+.player-wrapper:fullscreen .paused-info-layer,
+.player-wrapper:-webkit-full-screen .paused-info-layer,
+.player-wrapper.fake-fs .paused-info-layer {
+  left: 28px;
+  top: 26%;
+  max-width: min(520px, 65%);
+}
+.player-wrapper:fullscreen .paused-series-badge,
+.player-wrapper:-webkit-full-screen .paused-series-badge,
+.player-wrapper.fake-fs .paused-series-badge {
+  font-size: 0.68rem;
+  padding: 3px 9px;
+  margin-bottom: 8px;
+}
+.player-wrapper:fullscreen .paused-anime-title,
+.player-wrapper:-webkit-full-screen .paused-anime-title,
+.player-wrapper.fake-fs .paused-anime-title {
+  font-size: 1.55rem;
+}
+.player-wrapper:fullscreen .paused-meta-row,
+.player-wrapper:-webkit-full-screen .paused-meta-row,
+.player-wrapper.fake-fs .paused-meta-row {
+  font-size: 0.78rem;
+  margin: 6px 0 8px;
+}
+.player-wrapper:fullscreen .paused-ep-title,
+.player-wrapper:-webkit-full-screen .paused-ep-title,
+.player-wrapper.fake-fs .paused-ep-title {
+  font-size: 1rem;
+}
+
+/* 4. Thin Seekbar when idle, expands smoothly when touched/hovered */
+.custom-track-wrapper {
+  height: 3px !important;
+  transition: height 0.16s ease;
+}
+.timeline-box:hover .custom-track-wrapper,
+.timeline-box:active .custom-track-wrapper {
+  height: 7px !important;
+}
+.track-played::after {
+  width: 11px !important;
+  height: 11px !important;
+  margin-top: -5.5px !important;
+  right: -5.5px !important;
+}
+.timeline-box:active .track-played::after,
+.timeline-box:hover .track-played::after {
+  width: 15px !important;
+  height: 15px !important;
+  margin-top: -7.5px !important;
+  right: -7.5px !important;
+}
+
+/* 5. Bigger, Easy-to-Tap Chapter Pill (Normal vs Fullscreen) */
+.timeline-box {
+  padding-top: 26px !important;
+}
+.chapter-label.chapter-pill-trigger {
+  pointer-events: auto !important;
+  cursor: pointer;
+  z-index: 8 !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  top: -6px !important;
+  min-height: 28px;
+  padding: 4px 11px !important;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  color: #f8fafc;
+  font-size: 0.74rem !important;
+  font-weight: 700;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+.chapter-label.chapter-pill-trigger::after {
+  content: "›";
+  font-size: 1.05rem;
+  line-height: 1;
+  color: var(--accent);
+  font-weight: 800;
+}
+.chapter-label.chapter-pill-trigger:active {
+  background: var(--accent-soft);
+  transform: scale(0.96);
+}
+
+/* Bigger Chapter Pill in Fullscreen */
+.player-wrapper:fullscreen .timeline-box,
+.player-wrapper:-webkit-full-screen .timeline-box,
+.player-wrapper.fake-fs .timeline-box {
+  padding-top: 32px !important;
+}
+.player-wrapper:fullscreen .chapter-label.chapter-pill-trigger,
+.player-wrapper:-webkit-full-screen .chapter-label.chapter-pill-trigger,
+.player-wrapper.fake-fs .chapter-label.chapter-pill-trigger {
+  min-height: 34px;
+  padding: 6px 14px !important;
+  font-size: 0.84rem !important;
+  border-radius: 9px;
+}
+
+/* Prev/Next episode disabled state & Episodes button label */
+#prevEpBtn:disabled, #nextEpBtn:disabled { opacity: 0.35; pointer-events: none; }
+#floatingEpisodesBtn span { display: inline !important; }
+#floatingEpisodesBtn { width: auto !important; padding: 6px 11px !important; }
+
+/* Thumbnail cards inside Floating Episodes Drawer */
+.drawer-ep-card {
+  display: flex; align-items: center; gap: 10px; padding: 8px;
+}
+.drawer-ep-thumb {
+  width: 84px; height: 48px; border-radius: 7px; flex: none;
+  aspect-ratio: 16 / 9;
+}
+.drawer-ep-thumb::before { font-size: 1.1rem; }
+.drawer-ep-meta { min-width: 0; flex: 1; }
+.drawer-ep-top { display: flex; align-items: center; gap: 5px; }
+.watching-pill {
+  background: var(--danger); color: #fff; font-size: 0.56rem; font-weight: 800;
+  padding: 2px 5px; border-radius: 4px; letter-spacing: 0.4px; flex: none;
+}
+
+/* Compact Pre-Buffer Dropdown + Inline Custom Combo Box */
+.prebuf-setting-row { align-items: center; }
+.mem-note-sub { font-size: 0.7rem !important; color: var(--accent) !important; margin-top: 4px !important; }
+.mem-pick.compact { width: auto; flex: none; align-items: flex-end; }
+.mem-pick.compact .cs { width: auto; min-width: 112px; }
+.prebuf-hidden-cs { position: absolute !important; width: 0 !important; height: 0 !important; overflow: hidden !important; opacity: 0 !important; pointer-events: none !important; }
+.prebuf-custom-combo { display: inline-flex; align-items: center; gap: 6px; }
+.prebuf-combo-box {
+  display: inline-flex; align-items: center; height: 38px;
+  background: #0b0e16; border: 1px solid var(--accent); border-radius: 10px; overflow: hidden;
+}
+.prebuf-combo-box input {
+  width: 52px; background: transparent; border: 0; outline: none;
+  color: #fff; font-size: 0.82rem; font-weight: 700; text-align: right; padding-left: 8px;
+  user-select: text;
+}
+.prebuf-unit { font-size: 0.74rem; font-weight: 700; color: var(--muted); padding: 0 6px 0 3px; }
+.prebuf-arrow-btn {
+  height: 100%; padding: 0 8px; background: rgba(255,255,255,0.04); border: 0;
+  border-left: 1px solid var(--line); color: var(--text-2); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.prebuf-arrow-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.prebuf-save-btn {
+  width: 38px; height: 38px; border-radius: 10px; border: 0;
+  background: var(--accent); color: #fff; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.prebuf-save-btn:active { transform: scale(0.94); }
+
+
+/* ===== v1.24.2: Lower Paused Info + YouTube Translucent Center Play Badge ===== */
+.paused-info-layer {
+  top: auto !important;
+  bottom: 84px !important;
+  left: 16px !important;
+}
+.player-wrapper:fullscreen .paused-info-layer,
+.player-wrapper:-webkit-full-screen .paused-info-layer,
+.player-wrapper.fake-fs .paused-info-layer {
+  top: auto !important;
+  bottom: 108px !important;
+  left: 28px !important;
+}
+
+/* YouTube-style translucent center Play icon when paused */
+.yt-center-pause-badge {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) scale(0.88);
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(10, 14, 24, 0.52);
+  color: rgba(255, 255, 255, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 4px;
+  z-index: 17;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  transition: opacity 0.2s ease, transform 0.2s var(--ease), background 0.15s ease;
+}
+.player-wrapper.is-paused-ui .yt-center-pause-badge {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%) scale(1);
+}
+.yt-center-pause-badge:active {
+  transform: translate(-50%, -50%) scale(0.92);
+  background: rgba(10, 14, 24, 0.72);
+}
+.player-wrapper:fullscreen .yt-center-pause-badge,
+.player-wrapper:-webkit-full-screen .yt-center-pause-badge,
+.player-wrapper.fake-fs .yt-center-pause-badge {
+  width: 74px;
+  height: 74px;
+}
+
+
+
+/* ===== v1.24.4: Keep Paused Info (Bottom-Left) + Center Play Button Visible When HUD Hides ===== */
+.paused-ch-time {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #60a5fa;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.85);
+}
+
+/* When HUD hides during pause: keep info card + center button + subtle vignette visible, drop info card right into bottom-left corner */
+.player-wrapper.is-paused-ui.hud-hidden .paused-info-layer {
+  opacity: 1 !important;
+  pointer-events: none !important;
+  bottom: 18px !important;
+  left: 18px !important;
+  transition: bottom 0.25s var(--ease), left 0.25s var(--ease);
+}
+.player-wrapper:fullscreen.is-paused-ui.hud-hidden .paused-info-layer,
+.player-wrapper:-webkit-full-screen.is-paused-ui.hud-hidden .paused-info-layer,
+.player-wrapper.fake-fs.is-paused-ui.hud-hidden .paused-info-layer {
+  bottom: 24px !important;
+  left: 28px !important;
+}
+.player-wrapper.is-paused-ui.hud-hidden .yt-center-pause-badge {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+.player-wrapper.is-paused-ui.hud-hidden::before {
+  opacity: 1 !important;
+}
+
+
+/* ===== v1.25 Bordered Video Cards, Bottom & Side Lines, Folder Thumbnails, Hold Info Modal ===== */
+.bordered-media-card {
+  border: 1.5px solid rgba(148, 163, 184, 0.28) !important;
+  background: var(--surface) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.bordered-media-card:hover,
+.bordered-media-card.playing {
+  border-color: var(--accent) !important;
+}
+.bordered-media-card .q-thumb,
+.bordered-media-card .deck-thumb,
+.bordered-media-card .history-thumb {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+/* Text block with clean left side line & bottom divider */
+.media-card-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px 9px 11px;
+  border-left: 3px solid var(--accent);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+  flex: 1;
+}
+.bordered-media-card.playing .media-card-body {
+  border-left-color: var(--mint);
+}
+.media-card-body .q-name {
+  padding: 0 !important;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.media-card-body .q-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 700;
+  color: #f8fafc;
+}
+.media-card-body .q-ep {
+  flex: none;
+  font-weight: 800;
+  font-size: 0.72rem;
+  color: var(--accent);
+}
+.media-card-desc {
+  font-size: 0.67rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+/* Folder Explorer Video Card with Thumbnail */
+.explorer-video-card {
+  padding: 8px 10px !important;
+  gap: 10px !important;
+}
+.exp-vid-thumb {
+  width: 88px;
+  height: 50px;
+  border-radius: 7px;
+  flex: none;
+  aspect-ratio: 16 / 9;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+.exp-vid-thumb::before {
+  font-size: 1.1rem;
+}
+.exp-vid-body {
+  padding: 2px 0 2px 9px !important;
+  border-bottom: none !important;
+}
+
+/* Long-press Video Info Popup */
+.vid-info-dlg {
+  max-width: 390px !important;
+  padding: 16px !important;
+}
+.vid-info-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+.vid-info-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.98rem;
+  font-weight: 800;
+  color: #fff;
+}
+.vid-info-tag {
+  color: var(--accent);
+  font-size: 0.84rem;
+  flex: none;
+}
+.vid-info-desc {
+  font-size: 0.76rem !important;
+  color: var(--mint) !important;
+  margin: 4px 0 10px !important;
+}
+.vid-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line-soft);
+  font-size: 0.75rem;
+  color: var(--text-2);
+  word-break: break-word;
+}
+.vid-info-grid b {
+  color: var(--muted);
+}
+
+
+/* ===== v1.26 Ambient Anime/Media Background (Active only in Online Mode) ===== */
+.astra-ambient-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  filter: blur(28px) brightness(0.28) saturate(1.25);
+  transform: scale(1.08);
+  transition: opacity 0.45s ease;
+  pointer-events: none;
+}
+.astra-ambient-bg.active {
+  opacity: 1;
+}
+
+
+/* ===== v1.26.1 Ambient Background Visibility Fix ===== */
+.astra-ambient-bg {
+  z-index: 0 !important;
+  opacity: 0;
+  filter: blur(24px) brightness(0.34) saturate(1.3);
+}
+.astra-ambient-bg.active {
+  opacity: 0.85 !important;
+}
+.site-header, .page-view {
+  position: relative;
+  z-index: 1;
+}
+body:has(.astra-ambient-bg.active) {
+  background: #06080d !important;
+}
+
+
+/* ===== v1.26.3 Full Thumbnail Fit & YouTube Playlist Badge ===== */
+.deck-thumb, .q-thumb, .history-thumb, .vid-info-thumb {
+  background-size: cover !important;
+  background-color: #05070b !important;
+  background-repeat: no-repeat !important;
+}
+.youtube-folder-badge {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.64rem;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #ff0000;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(255,0,0,0.4);
+}
