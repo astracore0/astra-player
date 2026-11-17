@@ -224,18 +224,31 @@ function vpSet(p, patch) {
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
 
 let toastTimer = null;
-function showToast(message, ms = 3200) {
+function toastKind(msg) {
+  const m = String(msg).toLowerCase();
+  if (/fail|error|could not|couldn.t|cannot|can.t|not found|unreachable|rejected|denied|refused|no space|crash|went wrong/.test(m)) return 'err';
+  if (/warn|slow|retry|retrying|busy|waiting|missing|needs|please|not set|no subtitle|last episode|first episode|off\b|cleared|removed|cancel|stopp|heavy|no internet|offline/.test(m)) return 'warn';
+  return 'ok';
+}
+function showToast(message, ms = 3200, kind) {
   let el = $('astraToast');
   if (!el) {
     el = document.createElement('div');
     el.id = 'astraToast';
     el.className = 'astra-toast';
     el.setAttribute('role', 'status');
+    el.innerHTML = '<span class="at-ic"></span><span class="at-msg"></span><i class="at-bar"></i>';
   }
   // Fullscreen only paints the fullscreen element's subtree, so move the toast into it.
   const host = toastHost();
   if (el.parentNode !== host) host.appendChild(el);
-  el.textContent = message;
+  el.querySelector('.at-msg').textContent = message;
+  const k = kind || toastKind(message);
+  el.dataset.kind = k;
+  el.querySelector('.at-ic').textContent = k === 'err' ? '!' : k === 'warn' ? '\u25B2' : '\u2713';
+  const bar = el.querySelector('.at-bar');
+  el.classList.remove('show'); bar.style.animation = 'none'; void el.offsetWidth;          // restart the slide-in and the line
+  bar.style.animation = `atBar ${ms}ms linear forwards`;
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms);
@@ -2630,7 +2643,7 @@ $('btnSetAsMediaRoot').onclick = async () => {
 };
 
 $('btnPickFolderBrowse').onclick = () => {
-  exploreFolder(currentBrowsingDir || '/sdcard');
+  exploreFolder(libraryRoot || currentBrowsingDir || '');
   navigateTo('library');
 };
 
@@ -2794,7 +2807,7 @@ function navigateTo(hash) {
   if (target === 'home') { renderDashboard(homeQuickSearch ? homeQuickSearch.value.trim() : ''); renderHistory(); }
   if (target === 'player') { renderInlinePlaylist(); if (activeVideoPath) syncDeepLink(activeVideoPath); liteEnterPlayer(); }
   else liteLeavePlayer();
-  if (target === 'library') exploreFolder(currentBrowsingDir || '/sdcard');
+  if (target === 'library') exploreFolder(libraryRoot || currentBrowsingDir || '');
   if (target === 'tasks') refreshTasks();
 }
 window.addEventListener('hashchange', () => {
@@ -3303,7 +3316,7 @@ async function loadThumb(job) {
   let url = thumbCache.get(key);
   if (!url) {
     try {
-      const res = await fetch(`/api/thumb?file=${encodeURIComponent(file)}&kind=${kind}`);
+      const res = await fetch(`/api/thumb?file=${encodeURIComponent(file)}&kind=${kind}${prefs.networkMode === 'online' ? '&online=1' : ''}`);
       if (res.status === 200) {
         url = URL.createObjectURL(await res.blob());
         thumbCache.set(key, url);
@@ -3957,6 +3970,7 @@ const subRemove = async () => {
   }
 
   function renderAll() { picks.forEach((p) => render(p)); }
+  picks.forEach((p) => p.addEventListener('astra-refresh', () => render(p)));
   window.renderMemPickers = renderAll;
   renderAll();
 })();
@@ -4273,14 +4287,10 @@ const _lite = $('prefLite'); if (_lite) _lite.addEventListener('change', applyLi
   };
   setTimeout(load, 400);
 
-  /* --- animation switch (reuses the effects-off rules of Low-memory mode) --- */
-  function paintAnim() {
-    document.documentElement.classList.toggle('no-anim', prefs.anim === false);
-    $('btnAnimOn').classList.toggle('on', prefs.anim !== false); $('btnAnimOff').classList.toggle('on', prefs.anim === false);
-    $('btnAnimOn').setAttribute('aria-pressed', prefs.anim !== false); $('btnAnimOff').setAttribute('aria-pressed', prefs.anim === false);
-  }
-  $('btnAnimOn').onclick = () => { prefs.anim = true; savePrefs(); paintAnim(); };
-  $('btnAnimOff').onclick = () => { prefs.anim = false; savePrefs(); paintAnim(); };
+  /* --- animation switch (Settings > Preferences; same rules as Low-memory mode) --- */
+  function paintAnim() { document.documentElement.classList.toggle('no-anim', prefs.anim === false); }
+  const pa = $('prefAnim');
+  if (pa) { pa.checked = prefs.anim !== false; pa.onchange = () => { prefs.anim = pa.checked; savePrefs(); paintAnim(); showToast(pa.checked ? 'Animations on' : 'Animations off', 1800, pa.checked ? 'ok' : 'warn'); }; }
   paintAnim();
 
   /* --- next / previous --- */
@@ -4332,4 +4342,94 @@ const _lite = $('prefLite'); if (_lite) _lite.addEventListener('change', applyLi
   new MutationObserver(syncPausedOverlay).observe(settingsModal, { attributes: true, attributeFilter: ["class"] });
   new MutationObserver(syncPausedOverlay).observe(playerEpisodesDrawer, { attributes: true, attributeFilter: ["class"] });
   if ($("chaptersPanel")) new MutationObserver(syncPausedOverlay).observe($("chaptersPanel"), { attributes: true, attributeFilter: ["class"] });
+})();
+
+
+/* ===== v1.21.7: Files page, quality 4K, guest mode, button tips ===== */
+(function v1217() {
+  /* --- guest (friend through a tunnel): hide owner-only controls --- */
+  fetch('/api/whoami').then((r) => r.json()).then((d) => { if (d.guest) { document.documentElement.classList.add('guest'); const t = $('tasksSummary'); } }).catch(() => {});
+
+  /* --- Files: folder suggestions while typing, count follows the screen height --- */
+  const inp = $('storagePathInputField'), box = $('pathSuggest');
+  let sTimer = null, sSeq = 0;
+  const maxRows = () => Math.max(3, Math.min(10, Math.floor((window.innerHeight * 0.42) / 46)));
+  function hideSuggest() { box.classList.remove('open'); box.innerHTML = ''; }
+  async function suggest() {
+    const v = inp.value;
+    const i = v.lastIndexOf('/');
+    const dir = i <= 0 ? '/' : v.slice(0, i), prefix = v.slice(i + 1);
+    const seq = ++sSeq;
+    try {
+      const r = await fetch(`/api/storage/suggest?dir=${encodeURIComponent(dir)}&prefix=${encodeURIComponent(prefix)}&max=${maxRows()}`);
+      const d = await r.json();
+      if (seq !== sSeq || document.activeElement !== inp) return;
+      box.innerHTML = '';
+      (d.items || []).forEach((it) => {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'ps-item'; b.setAttribute('role', 'option');
+        b.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span></span>';
+        b.querySelector('span').textContent = it.name;
+        b.onpointerdown = (e) => { e.preventDefault(); inp.value = it.fullPath + '/'; hideSuggest(); exploreFolder(it.fullPath); };
+        box.appendChild(b);
+      });
+      box.classList.toggle('open', box.children.length > 0);
+    } catch (e) { hideSuggest(); }
+  }
+  inp.addEventListener('input', () => { clearTimeout(sTimer); sTimer = setTimeout(suggest, 120); });
+  inp.addEventListener('focus', () => { clearTimeout(sTimer); sTimer = setTimeout(suggest, 60); });
+  inp.addEventListener('blur', () => setTimeout(hideSuggest, 120));
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideSuggest(); if (e.key === 'Enter') hideSuggest(); });
+  if (!inp.value && libraryRoot) inp.value = libraryRoot;
+
+  /* --- quality: 1080p / 4K warning + memory estimate --- */
+  const sel = $('prefQuality'), info = $('qualityInfo');
+  const Q = {
+    fhd: { name: 'Full HD 1080p', mem: 160, rate: '8 Mbps', pre: 40, cpu: 'a fast phone or PC' },
+    uhd: { name: '4K 2160p', mem: 520, rate: '18 Mbps', pre: 120, cpu: 'a very fast PC (most phones cannot keep up live)' }
+  };
+  function paintQ() {
+    const q = Q[prefs.quality];
+    info.style.display = q ? '' : 'none';
+    if (!q) return;
+    const ram = navigator.deviceMemory ? ` This device reports about ${navigator.deviceMemory} GB RAM.` : '';
+    $('qualityInfoTitle').textContent = q.name + ' selected';
+    $('qualityInfoText').textContent = `Heavy: about ${q.mem} MB of RAM for decoding plus about ${q.rate} of data. Needs ${q.cpu}.${ram} Applies to 10-bit / HEVC videos that are converted live; 8-bit videos play at their own size.`;
+  }
+  sel.addEventListener('change', async () => {
+    const q = Q[sel.value];
+    paintQ();
+    if (!q) return;
+    const ok = await astraConfirm(`${q.name} needs about ${q.mem} MB of RAM and ${q.rate}. It may stutter on phones. The 10-bit pre-buffer will be raised to ${q.pre} MB so playback has a head start.`, { title: `Use ${q.name}?`, ok: 'Use it', danger: true });
+    if (!ok) { prefs.quality = 'auto'; sel.value = 'auto'; savePrefs(); paintQ(); return; }
+    if ((Number(prefs.preBufMB10) || 0) < q.pre) { prefs.preBufMB10 = q.pre; savePrefs(); document.querySelectorAll('.mem-pick').forEach((p) => p.dispatchEvent(new Event('astra-refresh'))); }
+    showToast(`${q.name} on: heavy on memory`, 3200, 'warn');
+  });
+  paintQ();
+
+  /* --- every button explains itself on hold/hover --- */
+  const TIPS = {
+    bigPlayBtn: 'Play or pause', closeSubPickerModalBtn: 'Close the subtitle list', openDrawerBtn: 'Open the menu', closeDrawerBtn: 'Close the menu', btnRescanLibrary: 'Scan the library folder again for new videos',
+    openClearHistoryModalBtn: 'Delete all watch history', btnTasksClear: 'Remove finished entries from the list', btnTasksStopAll: 'Stop every running job',
+    btnPrevEp: 'Play the previous episode', btnNextEp: 'Play the next episode', prevEpBtn: 'Previous episode', nextEpBtn: 'Next episode',
+    heroResumeBtn: 'Continue the last video where you stopped', chaptersBtn: 'Show chapters', closeEpisodesDrawerBtn: 'Close the episode list',
+    btnSubDownload: 'Save this subtitle as a file', btnSubRemove: 'Remove the selected subtitle', oaSave: 'Save the online AI settings', oaRemove: 'Delete the saved API key', oaShow: 'Show or hide the key'
+  };
+  function tipFor(b) {
+    if (TIPS[b.id]) return TIPS[b.id];
+    const t = (b.getAttribute('aria-label') || b.getAttribute('title') || '').trim();
+    if (t) return t;
+    const sp = (b.textContent || '').replace(/\s+/g, ' ').trim();
+    return sp ? sp.charAt(0).toUpperCase() + sp.slice(1) : '';
+  }
+  function tipAll(root) {
+    root.querySelectorAll('button, .icon-btn, .pill-btn, .action-btn, .chip-preset, .mode-card').forEach((b) => {
+      if (b.hasAttribute('data-tip') || b.closest('.kp, .cs-menu')) return;
+      const t = tipFor(b); if (!t) return;
+      b.setAttribute('data-tip', t); if (!b.getAttribute('aria-label') && !(b.textContent || '').trim()) b.setAttribute('aria-label', t);
+      b.setAttribute('data-tip-pos', b.closest('.site-header, .upload-zone-bar, .folder-action-bar, .view-header') ? 'b' : 't');
+    });
+  }
+  tipAll(document);
+  let tipT = null;
+  new MutationObserver(() => { clearTimeout(tipT); tipT = setTimeout(() => tipAll(document), 250); }).observe(document.body, { childList: true, subtree: true });
 })();

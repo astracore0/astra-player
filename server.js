@@ -15,6 +15,41 @@ const HOST = process.env.HOST || '0.0.0.0';
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
+/* ---- Guests (friends opening this through a tunnel, e.g. Cloudflare) get their own profile + history and cannot change host settings ---- */
+const USERS_DIR = path.join(__dirname, 'users');
+const isGuestReq = (req) => !!(req.headers['cf-connecting-ip'] || req.headers['cf-ray'] || req.headers['x-forwarded-for'] || req.headers['forwarded']);
+const HOST_ONLY = [['POST', /^\/api\/settings\/root$/], ['GET', /^\/api\/ai\/online$/], ['POST', /^\/api\/ai\/online$/], ['POST', /^\/api\/thumbs\/clear$/], ['POST', /^\/api\/system\/hw-reset$/],
+  ['POST', /^\/api\/tasks\/(stop|clear)$/], ['POST', /^\/api\/ai\/subs\/remove$/]];
+const guestStores = new Map();
+function guestStore(uid) {
+  let g = guestStores.get(uid);
+  if (g) return g;
+  g = { profile: {}, history: {}, timer: null };
+  try { const j = JSON.parse(fs.readFileSync(path.join(USERS_DIR, uid + '.json'), 'utf-8')); g.profile = j.profile || {}; g.history = j.history || {}; } catch (e) {}
+  guestStores.set(uid, g);
+  return g;
+}
+function guestSave(uid) {
+  const g = guestStores.get(uid); if (!g) return;
+  clearTimeout(g.timer);
+  g.timer = setTimeout(() => {
+    try { fs.mkdirSync(USERS_DIR, { recursive: true }); fs.writeFile(path.join(USERS_DIR, uid + '.json'), JSON.stringify({ profile: g.profile, history: g.history }), 'utf-8', () => {}); } catch (e) {}
+  }, 800);
+}
+app.use((req, res, next) => {
+  req.guest = isGuestReq(req);
+  if (!req.guest) return next();
+  let uid = (/(?:^|;\s*)astra_uid=([a-f0-9]{24})/.exec(req.headers.cookie || '') || [])[1];
+  if (!uid) { uid = require('crypto').randomBytes(12).toString('hex'); res.setHeader('Set-Cookie', 'astra_uid=' + uid + '; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax'); }
+  req.uid = uid;
+  const inRoot = (p) => { const abs = path.resolve(path.isAbsolute(p) ? p : path.join(MEDIA_ROOT, p)); return abs === MEDIA_ROOT || abs.startsWith(MEDIA_ROOT + path.sep); };
+  const probe = [req.query && req.query.file, req.query && req.query.dir, req.body && req.body.file].filter((x) => typeof x === 'string' && x);
+  if (probe.some((p) => !inRoot(p))) return res.status(403).json({ error: 'Outside the shared folder' });
+  if (HOST_ONLY.some(([m, re]) => m === req.method && re.test(req.path))) return res.status(403).json({ error: 'Only the owner of this server can do that', success: false });
+  next();
+});
+app.get('/api/whoami', (req, res) => res.json({ guest: !!req.guest }));
+
 
 /* ------------------------------------------------------------------ */
 /* Logging (console + app.log, trimmed on start so it never balloons)  */
@@ -948,7 +983,9 @@ const QUALITY = {
   low:      { height: 360, crf: 33, preset: 'ultrafast', hwBitrate: '900k', skipLoop: true },
   fast:     { height: 480, crf: 31, preset: 'ultrafast', hwBitrate: '1500k' },
   balanced: { height: 720, crf: 28, preset: 'ultrafast', hwBitrate: '3000k' },
-  quality:  { height: 720, crf: 23, preset: 'veryfast',  hwBitrate: '5000k' }
+  quality:  { height: 720, crf: 23, preset: 'veryfast',  hwBitrate: '5000k' },
+  fhd:      { height: 1080, crf: 25, preset: 'veryfast', hwBitrate: '8000k' },
+  uhd:      { height: 2160, crf: 26, preset: 'veryfast', hwBitrate: '18000k' }
 };
 
 function buildFfmpegArgs({ file, seekSec, audioTrack, transcodeVideo, quality, hw, legacy }) {
@@ -2181,23 +2218,24 @@ function profileSave() {
     });
   }, 300);
 }
-app.get('/api/profile', (req, res) => { res.set('Cache-Control', 'no-store'); res.json({ keys: profileData, now: Date.now() }); });
+app.get('/api/profile', (req, res) => { res.set('Cache-Control', 'no-store'); res.json({ keys: req.guest ? guestStore(req.uid).profile : profileData, now: Date.now() }); });
 app.post('/api/profile', (req, res) => {
   const ch = (req.body && req.body.changes) || {};
+  const store = req.guest ? guestStore(req.uid).profile : profileData;
   let n = 0;
   Object.keys(ch).forEach((k) => {
     const c = ch[k];
     if (!PROFILE_KEYS.has(k) || !c || typeof c.v !== 'string' || c.v.length > 512 * 1024) return;
-    if (profileData[k] && profileData[k].v === c.v) return;            // nothing new
-    profileData[k] = { v: c.v, t: Date.now() };                          // the SERVER clock decides, so a phone with a wrong clock can never lose
+    if (store[k] && store[k].v === c.v) return;            // nothing new
+    store[k] = { v: c.v, t: Date.now() };                          // the SERVER clock decides, so a phone with a wrong clock can never lose
     n++;
   });
-  if (n) profileSave();
-  res.json({ ok: true, updated: n, keys: profileData });
+  if (n) { if (req.guest) guestSave(req.uid); else profileSave(); }
+  res.json({ ok: true, updated: n, keys: store });
 });
 
 app.get('/api/history', (req, res) => {
-  res.json(historyData);
+  res.json(req.guest ? guestStore(req.uid).history : historyData);
 });
 
 app.post('/api/history', (req, res) => {
@@ -2209,7 +2247,8 @@ app.post('/api/history', (req, res) => {
   const d = Number.isFinite(Number(dur)) && Number(dur) > 0 ? Number(dur) : 0;
   const percent = d > 0 ? Math.max(0, Math.min(100, Math.floor((t / d) * 100))) : 0;
 
-  historyData[key] = {
+  const H = req.guest ? guestStore(req.uid).history : historyData;
+  H[key] = {
     name: String(name || path.basename(key)).slice(0, 512),
     relPath: key,
     time: Math.floor(t),
@@ -2218,18 +2257,19 @@ app.post('/api/history', (req, res) => {
     updated: Date.now()
   };
 
-  const keys = Object.keys(historyData);
+  const keys = Object.keys(H);
   if (keys.length > MAX_HISTORY_ENTRIES) {
-    keys.sort((a, b) => (historyData[b].updated || 0) - (historyData[a].updated || 0))
+    keys.sort((a, b) => (H[b].updated || 0) - (H[a].updated || 0))
       .slice(MAX_HISTORY_ENTRIES)
-      .forEach((k) => { delete historyData[k]; });
+      .forEach((k) => { delete H[k]; });
   }
 
-  persistHistory();
+  if (req.guest) guestSave(req.uid); else persistHistory();
   res.json({ status: 'saved' });
 });
 
 app.post('/api/history/clear', (req, res) => {
+  if (req.guest) { guestStore(req.uid).history = {}; guestSave(req.uid); return res.json({ status: 'cleared' }); }
   historyData = {};
   persistHistory();
   res.json({ status: 'cleared' });
@@ -2356,10 +2396,59 @@ function runThumbs() {
   });
 }
 
-app.get('/api/thumb', (req, res) => {
+
+/* ---- YouTube thumbnails: files saved by yt-dlp carry the video id ("Title [dQw4w9WgXcQ].mp4"); only used in Online mode ---- */
+const YT_DIR = path.join(CACHE_DIR, 'yt');
+try { fs.mkdirSync(YT_DIR, { recursive: true }); } catch (e) {}
+function ytIdOf(file) {
+  const base = path.basename(String(file || ''), path.extname(String(file || '')));
+  const m = /\[([A-Za-z0-9_-]{11})\]\s*$/.exec(base) || /[\s._(-]([A-Za-z0-9_-]{11})\)?$/.exec(base) || /\(([A-Za-z0-9_-]{11})\)/.exec(base);
+  return m && /[A-Za-z]/.test(m[1]) && !/^[a-z]+$/.test(m[1]) ? m[1] : null;
+}
+const ytBusy = new Map();
+async function ytThumb(id) {
+  const f = path.join(YT_DIR, id + '.jpg'), none = f + '.none';
+  if (fs.existsSync(f)) return f;
+  try { if (Date.now() - fs.statSync(none).mtimeMs < 3 * 864e5) return null; } catch (e) {}
+  if (ytBusy.has(id)) return ytBusy.get(id);
+  const p = (async () => {
+    for (const q of ['mqdefault', 'hqdefault']) {
+      try {
+        const r = await fetch('https://i.ytimg.com/vi/' + id + '/' + q + '.jpg', { signal: AbortSignal.timeout(10000) });
+        if (r.status === 404) continue;
+        if (!r.ok) return null;
+        const b = Buffer.from(await r.arrayBuffer());
+        if (b.length < 1500) continue;
+        fs.writeFileSync(f, b); enforceCacheQuota(YT_DIR, 40 * 1024 * 1024); return f;
+      } catch (e) { return null; }
+    }
+    try { fs.writeFileSync(none, ''); } catch (e) {}
+    return null;
+  })().finally(() => ytBusy.delete(id));
+  ytBusy.set(id, p);
+  return p;
+}
+/* Folder suggestions for the Files path box */
+app.get('/api/storage/suggest', (req, res) => {
+  const dir = typeof req.query.dir === 'string' && req.query.dir && isDir(req.query.dir) ? path.resolve(req.query.dir) : null;
+  if (!dir) return res.json({ items: [] });
+  const pre = String(req.query.prefix || '').toLowerCase();
+  const max = Math.max(3, Math.min(12, parseInt(req.query.max, 10) || 6));
+  try {
+    const items = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory())
+      .filter((d) => d.name.toLowerCase().includes(pre)).sort((a, b) => (b.name.toLowerCase().startsWith(pre) - a.name.toLowerCase().startsWith(pre)) || a.name.localeCompare(b.name, undefined, { numeric: true }))
+      .slice(0, max).map((d) => ({ name: d.name, fullPath: path.join(dir, d.name) }));
+    res.json({ items });
+  } catch (e) { res.json({ items: [] }); }
+});
+app.get('/api/thumb', async (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).end();
   const kind = req.query.kind === 'series' ? 'series' : 'video';
+  if (req.query.online === '1') {
+    const id = ytIdOf(r.path);
+    if (id) { const yf = await ytThumb(id); if (yf) { res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'public, max-age=604800'); return fs.createReadStream(yf).on('error', () => res.end()).pipe(res); } }
+  }
 
   // Don't compete with a live transcode, and don't leave browser connections hanging.
   if ((transcodeIsLive() || Date.now() < interactiveUntil) && !fs.existsSync(thumbFileFor(r, kind))) return res.status(204).end();
@@ -2442,7 +2531,7 @@ const onlineInFlight = new Map();
 async function queryAnimeArtwork(clean, qRes) {
   // 1. Try AniList GraphQL first for clean vertical cover images
   try {
-    const gql = `query ($s: String) { Media(search: $s, type: ANIME) { title { english romaji } coverImage { extraLarge large medium } description(asHtml: false) } }`;
+    const gql = `query ($s: String) { Page(perPage: 8) { media(search: $s, type: ANIME, sort: SEARCH_MATCH) { format title { english romaji native } synonyms coverImage { extraLarge large medium } description(asHtml: false) } } }`;
     const r2 = await fetch("https://graphql.anilist.co", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -2451,15 +2540,26 @@ async function queryAnimeArtwork(clean, qRes) {
     });
     if (r2.ok) {
       const j2 = await r2.json();
-      const m = j2 && j2.data && j2.data.Media;
-      if (m && m.coverImage) {
+      const list = (j2 && j2.data && j2.data.Page && j2.data.Page.media) || [];
+      const norm = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+      const want = norm(clean), wt = new Set(want.split(" ").filter(Boolean));
+      const score = (m) => {
+        let best = 0;
+        [m.title.english, m.title.romaji, m.title.native].concat(m.synonyms || []).forEach((t) => {
+          const n = norm(t); if (!n) return;
+          if (n === want) { best = Math.max(best, 1); return; }
+          const tt = new Set(n.split(" ")); let hit = 0; wt.forEach((w) => { if (tt.has(w)) hit++; });
+          best = Math.max(best, hit / Math.max(wt.size, tt.size));
+        });
+        return best + (m.format === "TV" ? 0.05 : 0);
+      };
+      const ranked = list.map((m) => ({ m, sc: score(m) })).sort((x, y) => y.sc - x.sc);
+      const top = ranked[0];
+      if (top && top.sc >= 0.5 && top.m.coverImage) {            // a wrong cover is worse than none: below 50% word match the local frame is used
+        const m = top.m;
         const remoteUrl = (qRes === "480p" ? (m.coverImage.extraLarge || m.coverImage.large) : (m.coverImage.large || m.coverImage.medium)) || "";
         if (remoteUrl) {
-          return {
-            title: m.title.english || m.title.romaji || clean,
-            remoteUrl,
-            synopsis: String(m.description || "").replace(/<[^>]+>/g, "").slice(0, 260)
-          };
+          return { title: m.title.english || m.title.romaji || clean, remoteUrl, synopsis: String(m.description || "").replace(/<[^>]+>/g, "").slice(0, 260) };
         }
       }
     }
@@ -2467,14 +2567,17 @@ async function queryAnimeArtwork(clean, qRes) {
 
   // 2. Fallback: Jikan (MAL) vertical images
   try {
-    const url = `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(clean)}&limit=1`;
+    const url = `https://api.jikan.moe/v4/anime?q=${encodeURIComponent(clean)}&limit=5`;
     const r = await fetch(url, {
       headers: { "User-Agent": "AstraPlayer/1.26 (Android; Termux)", "Accept": "application/json" },
       signal: AbortSignal.timeout(12000)
     });
     if (r.ok) {
       const json = await r.json();
-      const hit = json && json.data && json.data[0];
+      const nz = (x) => String(x || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(" ").filter(Boolean);
+      const wantW = new Set(nz(clean));
+      const good = (h) => Math.max(...[h.title, h.title_english].map((t) => { const tw = new Set(nz(t)); let n = 0; wantW.forEach((w) => { if (tw.has(w)) n++; }); return n / Math.max(wantW.size, tw.size, 1); })) >= 0.5;
+      const hit = json && json.data && json.data.find(good);
       if (hit && hit.images && hit.images.jpg) {
         const remoteUrl = hit.images.jpg.large_image_url || hit.images.jpg.image_url || "";
         if (remoteUrl) {
@@ -2502,7 +2605,7 @@ app.get("/api/meta/online", async (req, res) => {
   }
   const clean = parseMediaName(baseName).title || baseName;
 
-  const slug = crypto.createHash("sha1").update(`${clean.toLowerCase()}|${qRes}`).digest("hex");
+  const slug = crypto.createHash("sha1").update(`${clean.toLowerCase()}|${qRes}|v2`).digest("hex");
   const cacheFile = path.join(ONLINE_META_DIR, `${slug}.json`);
   const imgFile = path.join(ONLINE_META_DIR, `${slug}.jpg`);
 

@@ -440,12 +440,20 @@ h3 { font-size: 1rem; font-weight: 700; }
 .modal-dialog-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-l); padding: 16px; width: 100%; max-width: 400px; box-shadow: var(--shadow); animation: pop 0.22s var(--ease); }
 .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
 .astra-toast {
-  position: fixed; left: 50%; bottom: calc(26px + var(--safe-b)); transform: translate(-50%, 16px);
-  max-width: min(90vw, 440px); padding: 11px 18px; border-radius: 999px;
-  background: var(--surface-3); border: 1px solid var(--line); color: var(--text); font-size: 0.82rem; text-align: center;
-  box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s var(--ease); z-index: 9999;
+  position: fixed; left: 12px; top: calc(12px + var(--safe-t, 0px)); transform: translateX(-120%);
+  display: flex; align-items: center; gap: 10px; max-width: min(88vw, 420px); padding: 11px 16px 13px 12px; border-radius: 12px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--text); font-size: 0.82rem; text-align: left;
+  box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity .22s ease, transform .3s var(--ease); z-index: 99999;
 }
-.astra-toast.show { opacity: 1; transform: translate(-50%, 0); }
+.player-wrapper > .astra-toast { position: absolute; }
+.astra-toast.show { opacity: 1; transform: translateX(0); }
+.astra-toast .at-ic { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: .72rem; font-weight: 800; color: #0b0e16; background: var(--tc, var(--mint)); }
+.astra-toast .at-msg { min-width: 0; overflow-wrap: anywhere; line-height: 1.3; }
+.astra-toast .at-bar { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--tc, var(--mint)); transform-origin: left; }
+.astra-toast[data-kind="ok"] { --tc: var(--mint); }
+.astra-toast[data-kind="warn"] { --tc: var(--amber); }
+.astra-toast[data-kind="err"] { --tc: var(--danger); }
+@keyframes atBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
 
 /* -------------------------------------------------------------------------
    Rotated "landscape fullscreen" for phones held upright
@@ -1703,3 +1711,18 @@ body:has(.astra-ambient-bg.active) {
   color: #fff;
   box-shadow: 0 2px 8px rgba(255,0,0,0.4);
 }
+
+/* ===== v1.21.7 ===== */
+#btnPickFolderBrowse span, #btnAttachSubtitleFolder span { display: inline !important; }
+.upload-zone-bar .pill-btn { gap: 7px; }
+.path-input-group { position: relative; }
+.path-suggest { display: none; position: absolute; left: 0; right: 0; top: calc(100% + 6px); background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; z-index: 60; }
+.path-suggest.open { display: block; animation: fade .14s ease; }
+.ps-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; background: transparent; border: 0; border-bottom: 1px solid var(--line-soft); color: var(--text); font: inherit; font-size: .86rem; text-align: left; cursor: pointer; }
+.ps-item:last-child { border-bottom: 0; }
+.ps-item svg { flex: none; color: var(--accent); }
+.ps-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-item:hover, .ps-item:active { background: var(--accent-soft); }
+html.guest .host-only { display: none !important; }
+.q-info { border-left: 3px solid var(--amber); }
+.q-info h5 { color: var(--amber); }

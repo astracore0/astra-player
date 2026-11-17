@@ -277,3 +277,6 @@ A custom thumbnail always wins over the online cover and the video frame. png, j
 
 ## Online AI subtitles (optional)
 Settings > Online AI subtitles: pick Groq (free tier) or OpenAI or any OpenAI-compatible address, paste the API key, Save. In the player menu > Subtitles turn on "Online AI" and press Generate. Without a key everything stays local (whisper.cpp).
+
+## Sharing with friends (Cloudflare tunnel)
+Anyone who comes in through a tunnel is a guest: own settings + history, no access to host settings or files outside the library folder. Open it on your own phone / PC (localhost or Wi-Fi) and you are the owner.

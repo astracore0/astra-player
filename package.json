@@ -1,6 +1,6 @@
 {
   "name": "astra-player",
-  "version": "1.21.6",
+  "version": "1.21.7",
   "description": "Local storage anime streaming web player",
   "main": "server.js",
   "scripts": {

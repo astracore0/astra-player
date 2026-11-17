@@ -2,6 +2,16 @@
 
 Versions after 1.20.0 are the "1.21.x-flow" line: 1.21.1, 1.21.2, ... (never 1.22.0). 1.21.1-1.21.5 are the design (flow) updates; this one merges them with the engine work.
 
+## v1.21.7-flow
+- Friends through a tunnel (Cloudflare etc.) are guests: each gets their own default settings and watch history (cookie, saved in users/), cannot change the library folder, API key, caches or tasks, and can only open files inside the shared library folder. You and your own devices keep sharing one profile.
+- Notifications slide in from the top-left with a green / yellow / red line that counts down; they also show in fullscreen.
+- Files (was Folder Explorer): own folder icon, opens in your library folder (not /sdcard), Back button, Set Default Root (pin icon), folder suggestions under the path box (as many as fit the screen).
+- Player page: "Open Files" and "Add Subtitle" show their names; every button now has a hold/hover description.
+- Animations on/off moved to Settings > Preferences.
+- Quality: Full HD 1080p and 4K options with a warning, a RAM / data estimate, and the 10-bit pre-buffer is raised for them.
+- Online mode: YouTube downloads (file name ends with [videoId]) get their YouTube thumbnail; anime covers are only used when the title really matches (otherwise the local frame stays).
+- The sleep timer is not saved on purpose (it is a one-off timer). Every other option in Settings was checked to survive a reload.
+
 ## v1.21.6-flow
 - Merged the 1.21.5-flow design (online covers with Network mode, paused-info overlay, chapter pill, prev/next in the control bar) with the engine: ASS/SRT styling, speed pass, songs switch, Low-memory mode, setup.sh clone.
 - Buffer: open-ended range requests are now served up to 64 MB (was 8 MB), so the browser keeps a deep buffer ahead like before. 8-bit direct play never waits more than 20 s for the pre-buffer; 10-bit keeps its 5 s head start.
