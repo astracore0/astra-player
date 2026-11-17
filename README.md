@@ -4,6 +4,13 @@ Astra Player is a lightweight, offline-first media server and web player designe
 
 ---
 
+## Quick install
+```bash
+# Termux first:  pkg install -y curl git
+curl -fsSL https://raw.githubusercontent.com/astracore0/astra-player/main/setup.sh | bash
+```
+This clones https://github.com/astracore0/astra-player into ~/astra-player and installs everything (Node, ffmpeg, whisper.cpp + models). Other branch: add `-s -- --branch NAME`. Already cloned? Run `bash setup.sh --update` inside the folder.
+
 ## Subtitle styling (v1.17)
 ASS/SSA tracks are drawn with their own animation and placement: corners/top/middle/bottom, move, fades, \t transforms, karaoke, rotation, outline/shadow, named fonts and vector drawings (as SVG). Plain dialogue follows your subtitle settings. Embedded fonts and \clip are not supported yet.
 

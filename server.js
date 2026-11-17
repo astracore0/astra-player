@@ -262,7 +262,8 @@ app.post('/api/settings/root', (req, res) => {
 /* Metadata (ffprobe)                                                  */
 /* ------------------------------------------------------------------ */
 const metaCache = new Map();   // ffprobe results: reopening an episode (or the next one, prefetched) is instant
-function metaCacheSet(k, v) { if (metaCache.size > 300) metaCache.delete(metaCache.keys().next().value); metaCache.set(k, v); }
+const LITE_HOST = os.totalmem() < 3e9;          // small phone: keep caches small
+function metaCacheSet(k, v) { if (metaCache.size > (LITE_HOST ? 40 : 300)) metaCache.delete(metaCache.keys().next().value); metaCache.set(k, v); }
 app.get('/api/video/metadata', (req, res) => {
   const r = resolveFile(req.query.file, VIDEO_EXTS);
   if (r.error) return res.status(r.status).json({ error: r.error });
@@ -1280,7 +1281,7 @@ function aiFinish(job, state, msg) {
   job.state = state; job.msg = msg || ''; job.proc = null;
   if (state === 'done') {
     job.pct = 100;
-    aiIndex[job.key] = { name: job.exportName || niceSubName(job.relPath, job.mode), mode: job.mode || 'ai', path: job.path, size: job.sig && job.sig.size, mtimeMs: job.sig && job.sig.mtimeMs, audioTrack: job.audioTrack, lang: job.lang, translate: !!job.translate, model: job.model, lines: job.cues ? job.cues.length : 0, created: Date.now() };
+    aiIndex[job.key] = { name: job.exportName || niceSubName(job.relPath, job.mode), mode: job.mode || 'ai', path: job.path, size: job.sig && job.sig.size, mtimeMs: job.sig && job.sig.mtimeMs, audioTrack: job.audioTrack, lang: job.lang, translate: !!job.translate, songs: !!job.songs, model: job.model, lines: job.cues ? job.cues.length : 0, created: Date.now() };
     aiIndexSave();
   }
   try { if (job.wav) fs.unlinkSync(job.wav); } catch (e) {}
@@ -1560,10 +1561,10 @@ async function aiRun(job) {
   }
   const channels = await aiChannels(job.path, job.audioTrack);
   job.centre = channels >= 5;                     // 5.1 / 7.1: dialogue lives on the centre channel
-  const GATE = !(savedConfig.whisper && savedConfig.whisper.gate === false);
+  const GATE = !job.songs && !(savedConfig.whisper && savedConfig.whisper.gate === false);
   const CH = Math.max(20, Number(process.env.ASTRA_AI_CHUNK_SEC) || 120);
   // Chunk list: whole episode minus opening/ending/credits chapters (music, nothing to transcribe).
-  const skip = await aiSkipRanges(job.path);
+  const skip = job.songs ? [] : await aiSkipRanges(job.path);
   const list = [];
   if (job.duration > 0) {
     let cursor = 0;
@@ -1594,7 +1595,7 @@ async function aiRun(job) {
   workers = Math.max(1, Math.min(3, workers, list.length));
   const threadsEach = Math.max(1, Math.min(4, Number(savedConfig.whisper && savedConfig.whisper.threads) || Math.floor(cores / workers)));
   const vadModel = findVadModel();
-  job.tier = vadModel ? 0 : 2;               // 0 tuned voice detection, 1 basic, 2 fast flags only, 3 plain
+  job.tier = vadModel && !job.songs ? 0 : 2;               // 0 tuned voice detection, 1 basic, 2 fast flags only, 3 plain
   job.workers = workers; job.vad = !!vadModel;
   let fatal = null;
   const inflight = new Map();                // worker -> { t0 }
@@ -1628,7 +1629,9 @@ async function aiRun(job) {
         const down = job.centre ? 'pan=mono|c0=0.85*FC+0.15*FL+0.15*FR' : 'pan=mono|c0=0.5*c0+0.5*c1';
         const chain = [];
         if (mode === 0 && (job.centre || channels >= 2)) chain.push(down);
-        if (mode === 0 && job.mode !== 'quick') chain.push('highpass=f=180', 'lowpass=f=3800', 'dynaudnorm=f=150:g=15');
+        // No denoiser: it treats singing / background music as noise and eats those lines. Band-pass the voice range and lift quiet speech instead.
+        if (mode === 0 && job.songs) chain.push('highpass=f=60', 'lowpass=f=9000', 'dynaudnorm=f=150:g=7');
+        else if (mode === 0 && job.mode !== 'quick') chain.push('highpass=f=90', 'lowpass=f=7600', 'dynaudnorm=f=150:g=7');
         else if (mode === 0) chain.push('highpass=f=80');
         chain.push('aresample=async=1:first_pts=0');
         a.push('-vn', '-af', chain.join(','), '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wav);
@@ -1666,7 +1669,7 @@ async function aiRun(job) {
         }
         const toAbs = (cs) => cs.map((c) => (gate ? { s: gate.map(c.s, 's') + ss, e: Math.max(gate.map(c.s, 's'), gate.map(c.e, 'e')) + ss, text: c.text } : { s: c.s + ss, e: c.e + ss, text: c.text }));
         // tier 0 = fast flags + tuned VAD, 1 = fast flags + basic VAD, 2 = fast flags, 3 = plain
-        const run = (threads, tier) => { tier = gate ? Math.max(tier, 2) : tier;
+        const run = (threads, tier) => {
           const args = ['-m', modelPath, '-f', wavIn, '-t', String(threads), '-l', job.langUsed || job.lang, '-ovtt', '-of', prefix];
           if (tier <= 2) args.push('-bs', '1', '-bo', '1', '-mc', '0',
             ...(quick ? ['-ac', '768'] : []),                    // AI mode keeps the full audio window: shortened windows shift timestamps   // temperature fallback stays ON: it is what breaks decoding loops
@@ -1760,11 +1763,12 @@ function aiParams(src) {
   const translate = src.translate === true || src.translate === '1' || src.translate === 'true';
   const models = listWhisperModels();
   const mode = String(src.mode) === 'quick' ? 'quick' : 'ai';
+  const songs = src.songs === true || src.songs === '1' || src.songs === 1 || src.songs === 'true';   // keep songs / music scenes (no silence cutting, no OP/ED skip, no voice detector)
   // quick = smallest model (fast, rough); ai = the most accurate model that is installed and still practical on a phone
   const model = models.names.includes(String(src.model || '')) ? String(src.model)
     : mode === 'quick' ? (models.names.find((n) => /tiny/.test(n)) || models.names[models.names.length - 1] || '')
       : (models.names.find((n) => /base/.test(n)) || models.names.find((n) => /small/.test(n)) || models.names[0] || '');
-  return { r, audioTrack, lang, translate, model, mode, key: aiKeyFor(r, audioTrack, lang, translate, model + (mode === 'quick' ? '|quick' : '')) };
+  return { r, audioTrack, lang, translate, model, mode, songs, key: aiKeyFor(r, audioTrack, lang, translate, model + (mode === 'quick' ? '|quick' : '') + (songs ? '|songs' : '')) };
 }
 
 app.get('/api/ai/capabilities', (req, res) => {
@@ -1814,7 +1818,7 @@ app.post('/api/ai/subs', (req, res) => {
     }
     return res.json(aiPublic(existing));
   }
-  const job = { from: Math.max(0, parseFloat(req.body.from) || 0), key: p.key, path: p.r.path, relPath: String(req.body.file), audioTrack: p.audioTrack, lang: p.lang, translate: p.translate, mode: p.mode,
+  const job = { from: Math.max(0, parseFloat(req.body.from) || 0), key: p.key, path: p.r.path, relPath: String(req.body.file), audioTrack: p.audioTrack, lang: p.lang, translate: p.translate, mode: p.mode, songs: p.songs,
     model: p.model, sig: { size: p.r.stat.size, mtimeMs: p.r.stat.mtimeMs }, createdAt: Date.now(), state: 'queued', pct: 0, msg: 'Waiting in queue', duration: 0, proc: null };
   aiJobs.set(p.key, job);
   if (req.body && req.body.priority) aiQueue.unshift(p.key); else aiQueue.push(p.key);
@@ -2316,18 +2320,13 @@ process.on('exit', killTranscode);
 process.on('uncaughtException', (e) => log('ERROR', `Uncaught exception: ${e && e.stack ? e.stack : e}`));
 process.on('unhandledRejection', (e) => log('ERROR', `Unhandled rejection: ${e && e.stack ? e.stack : e}`));
 
-function startServer(port, attemptsLeft = 50) {
-  const srv = app.listen(port, HOST, () => {
-    log('SYSTEM', `Astra Pro Engine listening on ${port}`);
-    log('STORAGE', `Root target set to: ${MEDIA_ROOT}`);
-  });
-  srv.on('error', (e) => {
-    if (e.code === 'EADDRINUSE' && attemptsLeft > 0) {
-      log('SYSTEM', `Port ${port} busy, trying ${port + 1}...`);
-      return startServer(port + 1, attemptsLeft - 1);
-    }
-    log('ERROR', `Server error: ${e.message}`);
-    process.exit(1);
-  });
-}
-startServer(PORT);
+const server = app.listen(PORT, HOST, () => {
+  log('SYSTEM', `Astra Pro Engine listening on ${PORT}`);
+  log('STORAGE', `Root target set to: ${MEDIA_ROOT}`);
+});
+server.on('error', (e) => {
+  log('ERROR', e.code === 'EADDRINUSE'
+    ? `Port ${PORT} is already in use. Stop the other instance or start with PORT=<number>.`
+    : `Server error: ${e.message}`);
+  process.exit(1);
+});

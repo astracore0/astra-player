@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.21.0
+- AI subtitles: the denoiser is gone (it treated singing / background music as noise and removed those lines); speech is lifted with a band-pass + level normaliser instead. New switch **Include songs & music scenes**: no OP/ED skipping, no silence cutting, no voice detector - lyrics and music-scene dialogue are read too (cached separately from the normal one).
+- setup.sh clones the repo itself: curl -fsSL https://raw.githubusercontent.com/astracore0/astra-player/main/setup.sh | bash  (options --dir, --branch, --repo, --update).
+- Low-memory mode (Settings > Preferences, Auto/On/Off; Auto = phones with <= 2 GB RAM or <= 4 cores): empties the home/library/history pages while you watch and rebuilds them on return, unloads a video that has been paused outside the player for 90 s (reopens at the same spot), turns off blur/shadow/transition effects, halves the subtitle clock rate, keeps the server caches small on <3 GB devices.
+
 ## v1.20.0
 - Subtitles: font choice, border size, background colour + transparency, height from the bottom; they lift above the control bar automatically; Remove and Save (.srt) buttons; Generate becomes Generate again (replace) when this mode + language already exists; the file picker now opens inside fullscreen.
 - Settings: separate Auto-play (on open) and Auto-play next toggles; pre-buffer in MB for 8-bit and 10-bit (Off / 1 / 5 / 10 MB / Custom MB-GB) with the equivalent seconds for the open video; Save buttons everywhere.

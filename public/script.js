@@ -145,7 +145,7 @@ let sessionRestoreDone = false;
 let subsOn = false;
 let subDelay = 0;          // seconds; + = subtitles appear later
 let playbackSpeed = 1;
-const PREF_DEFAULTS = { v: 4, seekStep: 10, quality: 'auto', preBuffer: 0, preBufMB8: 0, preBufMB10: 0, autoPlay: true, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
+const PREF_DEFAULTS = { v: 4, seekStep: 10, quality: 'auto', lite: 'auto', preBuffer: 0, preBufMB8: 0, preBufMB10: 0, autoPlay: true, autoSkip: false, autoNext: true, thumbs: true, fsRotate: true, fsFill: false, hwEnc: 'off' };
 const prefs = Object.assign({}, PREF_DEFAULTS);
 try {
   const saved = JSON.parse(localStorage.getItem('astra_prefs') || '{}');
@@ -532,6 +532,7 @@ function loadSavedSettings() {
       if (saved.aiLang && [...aiUi.lang.options].some((o) => o.value === saved.aiLang)) aiUi.lang.value = saved.aiLang;
       if (saved.aiTr !== undefined) aiUi.tr.checked = !!saved.aiTr;
       if (saved.aiMode) setAiMode(saved.aiMode, false);
+      if (saved.aiSongs !== undefined) aiUi.songs.checked = !!saved.aiSongs;
     } catch (e) {}
   } catch (e) {}
   updateSubtitleStyles();
@@ -571,7 +572,7 @@ function saveCurrentSettings() {
   };
   const chip = document.querySelector('#tabFilters [data-filter].active, #tabFilters [data-mine].active');
   settings.filterChip = chip ? (chip.dataset.filter ? `f:${chip.dataset.filter}` : `m:${chip.dataset.mine}`) : '';
-  try { settings.aiLang = aiUi.lang.value; settings.aiTr = aiUi.tr.checked; settings.aiMode = aiMode; } catch (e) {}
+  try { settings.aiLang = aiUi.lang.value; settings.aiTr = aiUi.tr.checked; settings.aiSongs = aiUi.songs.checked; settings.aiMode = aiMode; } catch (e) {}
   lsSet('astra_user_settings', JSON.stringify(settings));
 }
 
@@ -1591,7 +1592,9 @@ function warmNextEpisode() {
   } catch (e) {}
 }
 
+var lastOpen = { title: '', rel: '' };
 async function inspectMediaAndPlay(rawTitle, relPath, seekTime = 0) {
+  lastOpen = { title: rawTitle, rel: relPath }; videoUnloaded = false;
   autoLevel = 0; autoSlowHits = 0;
   const token = ++playToken;
   seekTime = Number(seekTime) > 0 ? Number(seekTime) : 0;
@@ -1870,8 +1873,9 @@ video.addEventListener('timeupdate', () => {
 });
 
 // Subtitle timing needs finer resolution than timeupdate's ~4 Hz.
+let subTick = 0;
 setInterval(() => {
-  if (!video.paused && subsOn) updateSubtitleDisplay();
+  if (!video.paused && subsOn && (!isLite() || (subTick++ & 1) === 0)) updateSubtitleDisplay();
 }, 120);
 
 // Dragging only previews the position; the (expensive) seek happens on release.
@@ -2623,7 +2627,8 @@ function navigateTo(hash) {
   $('menuOverlay').classList.remove('open');
 
   if (target === 'home') { renderDashboard(homeQuickSearch ? homeQuickSearch.value.trim() : ''); renderHistory(); }
-  if (target === 'player') { renderInlinePlaylist(); if (activeVideoPath) syncDeepLink(activeVideoPath); }
+  if (target === 'player') { renderInlinePlaylist(); if (activeVideoPath) syncDeepLink(activeVideoPath); liteEnterPlayer(); }
+  else liteLeavePlayer();
   if (target === 'library') exploreFolder(currentBrowsingDir || '/sdcard');
   if (target === 'tasks') refreshTasks();
 }
@@ -3103,7 +3108,7 @@ function initPrefsPanel() {
     if (el.type === 'checkbox') { el.checked = !!prefs[key]; el.onchange = () => { prefs[key] = el.checked; savePrefs(); }; }
     else { el.value = String(prefs[key]); el.onchange = () => { prefs[key] = num ? Number(el.value) : el.value; savePrefs(); }; }
   };
-  bind('prefSeek', 'seekStep', true); bind('prefQuality', 'quality'); bind('prefAutoPlay', 'autoPlay');
+  bind('prefSeek', 'seekStep', true); bind('prefQuality', 'quality'); bind('prefAutoPlay', 'autoPlay'); bind('prefLite', 'lite');
   bind('prefAutoSkip', 'autoSkip'); bind('prefFsRotate', 'fsRotate'); bind('prefAutoNext', 'autoNext');
   bind('prefHw', 'hwEnc');
   bind('prefFsFill', 'fsFill'); $('prefFsFill').addEventListener('change', applyFill); applyFill();
@@ -3131,7 +3136,7 @@ initPrefsPanel();
 /* ------------------------------------------------------------------ */
 const aiUi = {
   box: $('aiBox'), state: $('aiState'), bar: $('aiBar'), prog: $('aiProgress'), hint: $('aiHint'), chip: $('aiChip'),
-  gen: $('aiGenBtn'), all: $('aiGenAllBtn'), cancel: $('aiCancelBtn'), lang: $('aiLang'), tr: $('aiTranslate'), files: $('aiFiles')
+  gen: $('aiGenBtn'), all: $('aiGenAllBtn'), cancel: $('aiCancelBtn'), lang: $('aiLang'), tr: $('aiTranslate'), songs: $('aiSongs'), files: $('aiFiles')
 };
 let aiMode = 'quick';
 let aiVad = true;
@@ -3155,7 +3160,7 @@ let aiLastCues = -1;
 
 function aiQuery(file) {
   return `file=${encodeURIComponent(file)}&audioTrack=${encodeURIComponent(activeAudioStreamIndex)}`
-    + `&lang=${aiUi.lang.value}&translate=${aiUi.tr.checked ? 1 : 0}&mode=${aiMode}`;
+    + `&lang=${aiUi.lang.value}&translate=${aiUi.tr.checked ? 1 : 0}&mode=${aiMode}&songs=${aiUi.songs.checked ? 1 : 0}`;
 }
 const aiMeta = document.createElement('div'); aiMeta.className = 'ai-meta';
 const aiLive = document.createElement('div'); aiLive.className = 'ai-live';
@@ -3247,7 +3252,7 @@ function aiStartPolling(file) {
 async function aiGenerate(file, priority) {
   const res = await fetch('/api/ai/subs', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, mode: aiMode, priority: !!priority, from: priority ? Math.floor(absoluteTime() || 0) : 0 })
+    body: JSON.stringify({ file, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, songs: aiUi.songs.checked, mode: aiMode, priority: !!priority, from: priority ? Math.floor(absoluteTime() || 0) : 0 })
   });
   return res.json();
 }
@@ -3277,7 +3282,7 @@ aiUi.cancel.onclick = async () => {
   clearInterval(aiPoll);
   aiCheck(activeVideoPath, false);
 };
-[aiUi.lang, aiUi.tr].forEach((el) => el.addEventListener('change', () => { if (activeVideoPath) aiCheck(activeVideoPath, false); }));
+[aiUi.lang, aiUi.tr, aiUi.songs].forEach((el) => el.addEventListener('change', () => { if (activeVideoPath) aiCheck(activeVideoPath, false); }));
 async function aiLoadExisting(path) {
   try {
     const d = await (await fetch(`/api/ai/subs/for?file=${encodeURIComponent(path)}`)).json();
@@ -3296,6 +3301,7 @@ async function aiLoadExisting(path) {
       if (rows.get(pick.key) && (vp.sub === 'ai' || wantKey || (vp.sub === undefined && nothing))) { selectOptRow(subTrackList, rows.get(pick.key)); selectSubtitleUrl(`/api/ai/subs/vtt?key=${pick.key}`); }
       if ([...aiUi.lang.options].some((o) => o.value === best.lang)) aiUi.lang.value = best.lang;
       aiUi.tr.checked = !!best.translate;
+      aiUi.songs.checked = !!(best.songs);
       setAiMode(best.mode === 'quick' ? 'quick' : 'ai', false);
       aiShow({ state: 'done', pct: 100, key: best.key, name: best.name });
     }
@@ -3523,7 +3529,7 @@ $('btnSubRemove').onclick = async () => {
     const again = lbl.textContent === 'Generate again';
     if (again && !window.confirm('Replace the existing subtitle with a fresh one?\n(To keep it and add another, change the mode or language first.)')) return;
     const res = await fetch('/api/ai/subs', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: activeVideoPath, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, mode: aiMode, priority: true, from: Math.floor(absoluteTime() || 0), force: again }) });
+      body: JSON.stringify({ file: activeVideoPath, audioTrack: activeAudioStreamIndex, lang: aiUi.lang.value, translate: aiUi.tr.checked, songs: aiUi.songs.checked, mode: aiMode, priority: true, from: Math.floor(absoluteTime() || 0), force: again }) });
     const info = await res.json();
     if (info.error) { showToast(info.error, 5000); return; }
     if (again) { const old = subTrackList.querySelector(`[data-ai-key="${info.key}"]`); if (old) old.remove(); }
@@ -3645,3 +3651,35 @@ document.addEventListener('click', (e) => {
     timer = setTimeout(() => show(b), b.dataset.tipHold ? 1200 : 450);
   });
 })();
+
+/* ===== Low-memory mode (v1.21) =====
+   Auto = on for phones that report <= 2 GB RAM or <= 4 cores. While it is on:
+   - the home / library / history pages are emptied (thumbnails + DOM freed) when the player opens, and rebuilt when you come back
+   - a video that sits paused outside the player for 90 s is unloaded (its buffer is released) and reopened at the same spot when you return
+   - effects (blur, shadows, transitions) are off and the subtitle clock ticks half as often */
+var videoUnloaded = false, unloadPos = 0, idleSince = 0;
+function isLite() {
+  const m = prefs.lite;
+  if (m === 'on') return true;
+  if (m === 'off') return false;
+  return (navigator.deviceMemory && navigator.deviceMemory <= 2) || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
+}
+function applyLite() { document.documentElement.classList.toggle('lite', isLite()); }
+function liteEnterPlayer() {
+  if (!isLite()) return;
+  try { thumbQueue.length = 0; } catch (e) {}
+  [seriesCardsGrid, $('historyGrid'), $('explorerContent')].forEach((el) => { if (el) el.replaceChildren(); });
+  if (videoUnloaded && lastOpen.rel) { videoUnloaded = false; inspectMediaAndPlay(lastOpen.title, lastOpen.rel, unloadPos); }
+}
+function liteLeavePlayer() { idleSince = Date.now(); }
+setInterval(() => {
+  if (!isLite() || currentView === 'player' || videoUnloaded || !activeVideoPath || !video.getAttribute('src')) return;
+  if (!video.paused) { idleSince = Date.now(); return; }
+  if (Date.now() - idleSince < 90000) return;
+  try {
+    unloadPos = absoluteTime() || 0; videoUnloaded = true;
+    video.removeAttribute('src'); video.load();
+  } catch (e) { videoUnloaded = false; }
+}, 10000);
+applyLite();
+const _lite = $('prefLite'); if (_lite) _lite.addEventListener('change', applyLite);

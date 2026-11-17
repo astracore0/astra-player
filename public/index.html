@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content">
   <title>Astra Player</title>
-  <link rel="stylesheet" href="style.css?v=280">
+  <link rel="stylesheet" href="style.css?v=290">
   <script>window.open = function() { return null; };</script>
 </head>
 <body>
@@ -297,6 +297,7 @@
                 <option value="de">German</option><option value="ru">Russian</option><option value="ar">Arabic</option>
               </select>
               <label class="switch-row"><input type="checkbox" id="aiTranslate"><i class="tgl"></i><span>To English</span></label>
+              <label class="switch-row" data-tip="Also reads songs, OP/ED and music scenes (slower, may add a few extra lines)" data-tip-hold="2000"><input type="checkbox" id="aiSongs"><i class="tgl"></i><span>Include songs &amp; music scenes</span></label>
             </div>
             <div class="ai-progress" id="aiProgress"><i id="aiBar"></i></div>
             <div class="ai-row">
@@ -452,6 +453,8 @@
         <select class="pref-select" id="prefSeek"><option value="5">5 s</option><option value="10">10 s</option><option value="15">15 s</option><option value="30">30 s</option></select></div>
       <div class="setting-item"><div><h5>Default resolution</h5><p id="prefHwText">Used for HEVC / 10-bit / compat mode</p></div>
         <select class="pref-select" id="prefQuality"><option value="auto">Auto (adapts to speed)</option><option value="low">Low (360p)</option><option value="fast">Fast (480p)</option><option value="balanced">Balanced (720p)</option><option value="quality">Quality (720p+)</option></select></div>
+      <div class="setting-item"><div><h5>Low-memory mode</h5><p>For weak phones: frees hidden pages and idle video, turns effects off. Auto decides by RAM / cores</p></div>
+        <select class="pref-select" id="prefLite"><option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option></select></div>
       <div class="setting-item"><div><h5>Hardware encoder</h5><p>Software = x264 (the v1.3 engine, most reliable). Auto tries the phone's H.264 encoder first</p></div>
         <select class="pref-select" id="prefHw"><option value="auto">Auto</option><option value="off">Software</option></select></div>
       <div class="setting-item col"><div><h5>Pre-buffer · 8-bit videos</h5><p>Memory to fill before playing starts</p></div><div class="mem-pick" data-mem="preBufMB8"></div></div>
@@ -513,6 +516,6 @@
     </div>
   </div>
 
-  <script src="script.js?v=280"></script>
+  <script src="script.js?v=290"></script>
 </body>
 </html>
