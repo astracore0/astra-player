@@ -26,11 +26,6 @@ jobs:
           curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
-      - name: Start server.js & Expose Public URL
+      - name: Start server.js
         run: |
-          node server.js &
-          sleep 3
-          echo "=========================================================="
-          echo "Starting Cloudflare Tunnel to expose localhost:3000..."
-          echo "=========================================================="
-          cloudflared tunnel --url http://localhost:3000
+          node server.js 
