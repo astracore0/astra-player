@@ -1,14 +1,14 @@
 node_modules/
-package-lock.json
-history.json
-config.json
-app.log
-subtitles/
-public/series_posters/
-public/cache_thumbs/
-.DS_Store
+# your data and generated files (never commit these)
 cache/
-history.json.tmp
+subtitles/
+users/
 models/
-*.zip
+config.json
+history.json
 profile.json
+chapters_map.json
+app.log
+start.sh
+*.log
+.DS_Store

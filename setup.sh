@@ -6,10 +6,18 @@
 #   bash setup.sh --media /path       set the media folder
 #   bash setup.sh --port 3000         remember the port (written to start.sh)
 #   bash setup.sh --dry-run           show what would be done, change nothing
+#   bash setup.sh --update            git pull the app first (when run inside the repo)
+#   bash setup.sh --dir ~/astra       where to clone the app (default ~/astra-player)
+#   bash setup.sh --branch NAME       branch to clone (default main)
 #   bash setup.sh --help
+#
+# One line, nothing downloaded first (clones the repo for you):
+#   curl -fsSL https://raw.githubusercontent.com/astracore0/astra-player/main/setup.sh | bash
+#   (Termux: pkg install -y curl git first)
 set -u
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
+REPO="https://github.com/astracore0/astra-player.git"; BRANCH="main"; TARGET=""; UPDATE=0
 WHISPER=1; MEDIA=""; PORT="3000"; DRY=0; WHISPER_MODEL="base"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -27,7 +35,11 @@ while [ $# -gt 0 ]; do
     --port) shift; PORT="${1:-3000}" ;;
     --model) shift; WHISPER_MODEL="${1:-base}" ;;
     --dry-run) DRY=1 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --update) UPDATE=1 ;;
+    --dir) shift; TARGET="${1:-}" ;;
+    --branch) shift; BRANCH="${1:-main}" ;;
+    --repo) shift; REPO="${1:-$REPO}" ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -113,12 +125,30 @@ if [ "$DRY" != 1 ]; then
   ok "node $(node -v), $(ffmpeg -version | head -n1 | cut -d' ' -f1-3)"
 fi
 
+# ---------------------------------------------------------------- get the app (clone / update)
+# Run from a downloaded setup.sh alone (or piped from curl) there is no app next to it: clone the repo.
+if [ ! -f "$DIR/server.js" ] || [ ! -f "$DIR/package.json" ]; then
+  TARGET="${TARGET:-$HOME/astra-player}"
+  say "Getting Astra Player from $REPO ($BRANCH) into $TARGET"
+  if [ -d "$TARGET/.git" ]; then
+    run git -C "$TARGET" pull --ff-only || warn "could not update $TARGET (local changes?)"
+  else
+    run git clone --depth 1 -b "$BRANCH" "$REPO" "$TARGET" || die "git clone failed. Check the internet connection, or the branch name (--branch)."
+  fi
+  DIR="$TARGET"
+elif [ "$UPDATE" = 1 ] && [ -d "$DIR/.git" ]; then
+  say "Updating the app (git pull)"
+  run git -C "$DIR" pull --ff-only || warn "git pull failed (local changes?) - continuing with the files you have"
+fi
+
 # ---------------------------------------------------------------- app dependencies
 say "Installing app dependencies"
 if [ -f "$DIR/package.json" ]; then
   (cd "$DIR" && run npm install --omit=dev --no-audit --no-fund) || die "npm install failed"
+elif [ "$DRY" = 1 ]; then
+  echo "   [dry-run] (package.json appears after the clone)"
 else
-  die "package.json not found next to setup.sh ($DIR)"
+  die "package.json not found in $DIR - clone failed or wrong --branch?"
 fi
 
 # ---------------------------------------------------------------- media folder
@@ -222,7 +252,7 @@ if have hostname; then IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; fi
 [ -z "$IP" ] && have ifconfig && IP="$(ifconfig 2>/dev/null | awk '/inet / && $2!="127.0.0.1"{print $2; exit}')"
 echo
 ok "Setup finished."
-echo "   Start:   bash start.sh        (or: node server.js)"
+echo "   Start:   cd $DIR && bash start.sh        (or: node server.js)"
 echo "   Open:    http://localhost:$PORT"
 [ -n "$IP" ] && echo "   Other devices on the same Wi-Fi: http://$IP:$PORT"
 [ "${CODESPACES:-}" = "true" ] && echo "   Codespaces: open the Ports tab, forward port $PORT, and open the forwarded address."

@@ -1,11 +1,27 @@
 {
   "name": "astra-player",
-  "version": "1.20.0",
-  "description": "Local storage anime streaming web player",
+  "version": "2.4.0",
+  "description": "Self-hosted anime/video player for your own files: Node + ffmpeg server, phone-friendly web UI, live 10-bit/HEVC conversion with a disk cache",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/astracore0/astra-player.git"
+  },
+  "keywords": [
+    "video-player",
+    "anime",
+    "ffmpeg",
+    "transcoding",
+    "self-hosted",
+    "termux",
+    "express"
+  ],
   "license": "MIT",
   "dependencies": {
     "express": "^4.22.3"
