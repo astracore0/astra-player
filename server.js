@@ -156,20 +156,24 @@ try {
   log('ERROR', `config.json unreadable, using defaults (${e.message})`);
 }
 
+const LOCAL_MEDIA = path.join(__dirname, 'media');
+
 const STORAGE_SHARED = path.join(os.homedir(), 'storage', 'shared');
 const ROOT_CANDIDATES = [
+  LOCAL_MEDIA,
   path.join(STORAGE_SHARED, 'anime'),
   path.join(STORAGE_SHARED, 'Anime'),
   '/sdcard/anime',
   '/sdcard/Anime',
-  '/sdcard/.anime',
+  '/sdcard/.anine',
   '/sdcard'
 ];
-const DEFAULT_ROOT = ROOT_CANDIDATES.find(isDir) || STORAGE_SHARED;
+const DEFAULT_ROOT = ROOT_CANDIDATES.find(isDir) || LOCAL_MEDIA;
 
 let MEDIA_ROOT = (savedConfig.mediaRoot && isDir(savedConfig.mediaRoot))
-  ? savedConfig.mediaRoot
-  : DEFAULT_ROOT;
+? savedConfig.mediaRoot
+: DEFAULT_ROOT;
+
 
 const SUBTITLES_DIR = path.join(__dirname, 'subtitles');
 const CACHE_DIR = path.join(__dirname, 'cache');
