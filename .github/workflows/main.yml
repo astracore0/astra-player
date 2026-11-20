@@ -1,0 +1,37 @@
+name: Host Astra-Player Server Publicly
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  host-server:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Cloudflare Tunnel (cloudflared)
+        run: |
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Start server.js & Expose Public URL
+        run: |
+          node server.js &
+          sleep 3
+          echo "=========================================================="
+          echo "Starting Cloudflare Tunnel to expose localhost:1234..."
+          echo "Check the logs below for your *.trycloudflare.com public URL"
+          echo "=========================================================="
+          cloudflared tunnel --url http://localhost:1234
