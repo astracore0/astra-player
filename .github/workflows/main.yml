@@ -1,4 +1,4 @@
-name: Host Astra-Player Server Publicly
+name: Host Server Publicly
 
 on:
   push:
@@ -31,7 +31,6 @@ jobs:
           node server.js &
           sleep 3
           echo "=========================================================="
-          echo "Starting Cloudflare Tunnel to expose localhost:1234..."
-          echo "Check the logs below for your *.trycloudflare.com public URL"
+          echo "Starting Cloudflare Tunnel to expose localhost:3000..."
           echo "=========================================================="
-          cloudflared tunnel --url http://localhost:1234
+          cloudflared tunnel --url http://localhost:3000
