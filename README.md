@@ -6,6 +6,10 @@ Videos a browser cannot play (10-bit, HEVC/H.265) are converted live with ffmpeg
 
 No account, no cloud, no tracking. It was built and tested mainly on a low-end Android phone (Termux), so it is careful with CPU and memory.
 
+## Demo
+
+**[ [ AstraPlayer Test Link ] ](https://ships-tour-edge-cell.trycloudflare.com/)**
+
 ## Features
 
 **Library**
