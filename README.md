@@ -8,7 +8,7 @@ No account, no cloud, no tracking. It was built and tested mainly on a low-end A
 
 ## Demo
 
-**[ [ AstraPlayer Test Link ] ](https://ships-tour-edge-cell.trycloudflare.com/)**
+**[ AstraPlayer Test Link ](https://astra-player1.onrender.com/)**
 
 ## Features
 
